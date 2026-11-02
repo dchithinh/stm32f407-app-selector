@@ -9,7 +9,7 @@
 static FATFS g_fs;
 static bool g_mounted;
 
-static bool ends_with_bin(const char *name)
+static bool ends_with_ci(const char *name, const char *ext4)
 {
 	size_t n = strlen(name);
 
@@ -17,17 +17,22 @@ static bool ends_with_bin(const char *name)
 		return false;
 	}
 	return (name[n - 4U] == '.') &&
-	       (name[n - 3U] == 'b' || name[n - 3U] == 'B') &&
-	       (name[n - 2U] == 'i' || name[n - 2U] == 'I') &&
-	       (name[n - 1U] == 'n' || name[n - 1U] == 'N');
+	       ((name[n - 3U] | 0x20) == (ext4[0] | 0x20)) &&
+	       ((name[n - 2U] | 0x20) == (ext4[1] | 0x20)) &&
+	       ((name[n - 1U] | 0x20) == (ext4[2] | 0x20));
 }
 
-static void strip_bin_ext(char *dst, size_t dst_len, const char *fname)
+static bool is_installable_name(const char *name)
+{
+	return ends_with_ci(name, "bin") || ends_with_ci(name, "elf");
+}
+
+static void strip_known_ext(char *dst, size_t dst_len, const char *fname)
 {
 	size_t n = strlen(fname);
 	size_t copy = n;
 
-	if (copy >= 4U && ends_with_bin(fname)) {
+	if (is_installable_name(fname)) {
 		copy -= 4U;
 	}
 	if (copy >= dst_len) {
@@ -91,10 +96,14 @@ bool sd_apps_scan(sd_app_list_t *out)
 		if (fno.fattrib & AM_DIR) {
 			continue;
 		}
-		if (!ends_with_bin(fno.fname)) {
+		if (!is_installable_name(fno.fname)) {
 			continue;
 		}
-		if (fno.fsize == 0U || fno.fsize > APP_FLASH_SIZE) {
+		/* .bin must fit the app slot. .elf can be larger (debug) — only PT_LOAD is programmed. */
+		if (fno.fsize == 0U) {
+			continue;
+		}
+		if (ends_with_ci(fno.fname, "bin") && fno.fsize > APP_FLASH_SIZE) {
 			continue;
 		}
 		if (out->count >= SD_APPS_MAX) {
@@ -105,7 +114,7 @@ bool sd_apps_scan(sd_app_list_t *out)
 			sd_app_entry_t *e = &out->items[out->count];
 
 			snprintf(e->path, sizeof(e->path), "%s/%s", SD_APPS_DIR, fno.fname);
-			strip_bin_ext(e->name, sizeof(e->name), fno.fname);
+			strip_known_ext(e->name, sizeof(e->name), fno.fname);
 			e->size = fno.fsize;
 			out->count++;
 		}
@@ -113,7 +122,7 @@ bool sd_apps_scan(sd_app_list_t *out)
 	f_closedir(&dir);
 
 	if (out->count == 0U) {
-		snprintf(out->error, sizeof(out->error), "No .bin in %s", SD_APPS_DIR);
+		snprintf(out->error, sizeof(out->error), "No .bin/.elf in %s", SD_APPS_DIR);
 		return false;
 	}
 	return true;

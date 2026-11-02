@@ -187,7 +187,7 @@ static void ui_handle_list_tap(int16_t x, int16_t y)
 		ui_draw_message("Working", "Installing...");
 		printf("UI: install %s\r\n", g_apps.items[g_selected].path);
 		if (boot_app_install_from_file(g_apps.items[g_selected].path)) {
-			boot_jump_to_app();
+			boot_app_reboot_after_install();
 		}
 		snprintf(g_msg, sizeof(g_msg), "Install failed");
 		strncpy(g_title, "Error", sizeof(g_title));

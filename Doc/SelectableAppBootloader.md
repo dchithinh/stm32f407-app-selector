@@ -87,13 +87,11 @@ Example (TBD in implementation):
 
 ```
 /apps/
-  pomodoro.bin
-  game.bin
-  ...
-/apps.json          # optional: display name, version, CRC, filename
+  pomodoro.bin          # raw image, programmed from 0x08010000
+  stm32f407xx_pomodoro.elf   # ARM ELF32; only FLASH PT_LOAD is programmed
 ```
 
-Image rules (TBD): maximum size ≤ app slot, magic/CRC or hash, reject before erasing flash.
+`.bin` size must be ≤ app slot. `.elf` may be larger (debug); the bootloader writes loadable flash segments only and still requires `APP.ld` (`0x08010000`). Do not copy an ELF and flash it as if it were a raw `.bin`.
 
 ---
 

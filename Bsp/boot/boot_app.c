@@ -16,6 +16,8 @@
 
 static uint8_t s_install_io_buf[INSTALL_IO_CHUNK] __attribute__((aligned(8)));
 
+#define APP_RESET_MAX_OFFSET      (48U * 1024U)
+
 static bool thumb_reset_in_app_region(uint32_t addr)
 {
 	if ((addr & 1U) == 0U) {
@@ -24,6 +26,16 @@ static bool thumb_reset_in_app_region(uint32_t addr)
 	addr &= ~1U;
 	return (addr >= APP_FLASH_BASE) &&
 	       (addr < (APP_FLASH_BASE + APP_FLASH_SIZE));
+}
+
+static bool reset_vector_plausible(uint32_t reset)
+{
+	uint32_t entry = reset & ~1U;
+
+	if (!thumb_reset_in_app_region(reset)) {
+		return false;
+	}
+	return (entry - APP_FLASH_BASE) < APP_RESET_MAX_OFFSET;
 }
 
 static bool stack_pointer_in_sram(uint32_t sp)
@@ -43,7 +55,7 @@ bool boot_app_is_valid(void)
 	if (!stack_pointer_in_sram(sp)) {
 		return false;
 	}
-	if (!thumb_reset_in_app_region(reset)) {
+	if (!reset_vector_plausible(reset)) {
 		return false;
 	}
 	return true;
@@ -64,8 +76,8 @@ void boot_app_log_status(void)
 	       (unsigned long)reset,
 	       (unsigned long)entry,
 	       (unsigned long)(reset & 1U),
-	       thumb_reset_in_app_region(reset) ? "OK" :
-		       "BAD (expect odd addr in app slot range)");
+	       reset_vector_plausible(reset) ? "OK" :
+		       "BAD (check APP.ld @ 0x08010000; reset must be near app base)");
 	if (entry < APP_FLASH_BASE) {
 		printf("  hint: entry below app base — app may be linked with\r\n");
 		printf("        STM32F407VGTX_BL.ld (0x08000000) not APP.ld (0x%08lX)\r\n",
@@ -128,8 +140,7 @@ static void boot_jump_with_msp(uint32_t sp, uint32_t entry)
 	__DSB();
 	__ISB();
 
-	/* App startup (Reset_Handler) expects to run with interrupts unmasked. */
-	__enable_irq();
+	__disable_irq();
 
 	go = (app_entry_fn)entry;
 	go();
@@ -215,15 +226,201 @@ static bool flash_program_buffer(uint32_t addr, const uint8_t *data, uint32_t le
 	return true;
 }
 
+static uint32_t rd_le32(const uint8_t *p)
+{
+	uint32_t v;
+
+	memcpy(&v, p, 4U);
+	return v;
+}
+
+static uint16_t rd_le16(const uint8_t *p)
+{
+	uint16_t v;
+
+	memcpy(&v, p, 2U);
+	return v;
+}
+
+static bool flash_program_file_range(FIL *fp, uint32_t file_off, uint32_t flash_addr, uint32_t nbytes)
+{
+	uint32_t done = 0U;
+	uint32_t next_progress = INSTALL_PROGRESS_STEP;
+
+	if ((flash_addr < APP_FLASH_BASE) ||
+	    ((flash_addr + nbytes) > (APP_FLASH_BASE + APP_FLASH_SIZE))) {
+		printf("install: dest 0x%08lX+%lu outside app slot\r\n",
+		       (unsigned long)flash_addr, (unsigned long)nbytes);
+		return false;
+	}
+
+	if (f_lseek(fp, file_off) != FR_OK) {
+		printf("install: seek %lu failed\r\n", (unsigned long)file_off);
+		return false;
+	}
+
+	while (done < nbytes) {
+		UINT to_read = (UINT)INSTALL_IO_CHUNK;
+		UINT br;
+
+		if ((nbytes - done) < to_read) {
+			to_read = (UINT)(nbytes - done);
+		}
+
+		if (f_read(fp, s_install_io_buf, to_read, &br) != FR_OK || br == 0U) {
+			printf("install: read fail @ file+%lu\r\n", (unsigned long)(file_off + done));
+			return false;
+		}
+
+		if ((br & 3U) != 0U) {
+			while ((br & 3U) != 0U && br < INSTALL_IO_CHUNK) {
+				s_install_io_buf[br++] = 0xFFU;
+			}
+		}
+
+		if (!flash_program_buffer(flash_addr + done, s_install_io_buf, br)) {
+			return false;
+		}
+
+		done += br;
+		if (done >= next_progress || done == nbytes) {
+			printf("install: %lu / %lu @ 0x%08lX\r\n",
+			       (unsigned long)done, (unsigned long)nbytes,
+			       (unsigned long)flash_addr);
+			while (next_progress <= done) {
+				next_progress += INSTALL_PROGRESS_STEP;
+			}
+		}
+	}
+	return true;
+}
+
+static bool install_raw_bin(FIL *fp, uint32_t file_size)
+{
+	if (file_size == 0U || file_size > APP_FLASH_SIZE) {
+		printf("install: bad .bin size %lu\r\n", (unsigned long)file_size);
+		return false;
+	}
+	printf("install: raw .bin %lu bytes -> 0x%08lX\r\n",
+	       (unsigned long)file_size, (unsigned long)APP_FLASH_BASE);
+	return flash_program_file_range(fp, 0U, APP_FLASH_BASE, file_size);
+}
+
+static bool install_elf32(FIL *fp, uint32_t file_size)
+{
+	uint8_t eh[52];
+	UINT br;
+	uint32_t phoff;
+	uint16_t phentsize;
+	uint16_t phnum;
+	uint16_t i;
+	uint32_t programmed = 0U;
+
+	if (file_size < 52U) {
+		printf("install: ELF too small\r\n");
+		return false;
+	}
+
+	if (f_lseek(fp, 0) != FR_OK ||
+	    f_read(fp, eh, sizeof(eh), &br) != FR_OK || br != sizeof(eh)) {
+		printf("install: ELF header read fail\r\n");
+		return false;
+	}
+
+	if (eh[0] != 0x7FU || eh[1] != 'E' || eh[2] != 'L' || eh[3] != 'F') {
+		printf("install: not ELF\r\n");
+		return false;
+	}
+	if (eh[4] != 1U || eh[5] != 1U) {
+		printf("install: need ELF32 little-endian\r\n");
+		return false;
+	}
+	if (rd_le16(eh + 16) != 2U) {
+		printf("install: ELF not ET_EXEC\r\n");
+		return false;
+	}
+	if (rd_le16(eh + 18) != 40U) {
+		printf("install: ELF not EM_ARM\r\n");
+		return false;
+	}
+
+	phoff = rd_le32(eh + 28);
+	phentsize = rd_le16(eh + 42);
+	phnum = rd_le16(eh + 44);
+
+	if (phentsize < 32U || phnum == 0U || phnum > 32U) {
+		printf("install: bad ELF phdrs (%u x %u)\r\n",
+		       (unsigned)phnum, (unsigned)phentsize);
+		return false;
+	}
+
+	printf("install: ELF32 ARM, %u load headers\r\n", (unsigned)phnum);
+
+	for (i = 0U; i < phnum; i++) {
+		uint8_t ph[32];
+		uint32_t p_type;
+		uint32_t p_offset;
+		uint32_t p_paddr;
+		uint32_t p_filesz;
+
+		if (f_lseek(fp, phoff + ((uint32_t)i * phentsize)) != FR_OK ||
+		    f_read(fp, ph, 32U, &br) != FR_OK || br != 32U) {
+			printf("install: phdr %u read fail\r\n", (unsigned)i);
+			return false;
+		}
+
+		p_type = rd_le32(ph + 0);
+		p_offset = rd_le32(ph + 4);
+		p_paddr = rd_le32(ph + 12);
+		p_filesz = rd_le32(ph + 16);
+
+		if (p_type != 1U || p_filesz == 0U) {
+			continue;
+		}
+
+		/* RAM / CCM — startup copies these; do not write SRAM as flash. */
+		if (p_paddr >= 0x20000000U || (p_paddr >= 0x10000000U && p_paddr < 0x10010000U)) {
+			printf("install: skip RAM segment @ 0x%08lX (%lu B)\r\n",
+			       (unsigned long)p_paddr, (unsigned long)p_filesz);
+			continue;
+		}
+
+		printf("install: FLASH PT_LOAD file+0x%lX -> 0x%08lX (%lu B)\r\n",
+		       (unsigned long)p_offset, (unsigned long)p_paddr,
+		       (unsigned long)p_filesz);
+
+		if (!flash_program_file_range(fp, p_offset, p_paddr, p_filesz)) {
+			return false;
+		}
+		programmed += p_filesz;
+	}
+
+	if (programmed == 0U) {
+		printf("install: no FLASH PT_LOAD in ELF\r\n");
+		return false;
+	}
+	return true;
+}
+
+static bool file_is_elf(FIL *fp)
+{
+	uint8_t mag[4];
+	UINT br;
+
+	if (f_lseek(fp, 0) != FR_OK ||
+	    f_read(fp, mag, 4U, &br) != FR_OK || br != 4U) {
+		return false;
+	}
+	return mag[0] == 0x7FU && mag[1] == 'E' && mag[2] == 'L' && mag[3] == 'F';
+}
+
 bool boot_app_install_from_file(const char *fat_path)
 {
 	FIL fp;
 	FRESULT fr;
-	UINT br;
-	uint32_t addr = APP_FLASH_BASE;
-	uint32_t total = 0U;
 	uint32_t file_size;
-	uint32_t next_progress = INSTALL_PROGRESS_STEP;
+	bool ok;
+	bool elf;
 
 	if (fat_path == NULL || fat_path[0] == '\0') {
 		return false;
@@ -236,11 +433,10 @@ bool boot_app_install_from_file(const char *fat_path)
 	}
 
 	file_size = (uint32_t)f_size(&fp);
-	if (file_size == 0U || file_size > APP_FLASH_SIZE) {
-		printf("install: bad size %lu\r\n", (unsigned long)file_size);
-		(void)f_close(&fp);
-		return false;
-	}
+	elf = file_is_elf(&fp);
+
+	printf("install: %s (%lu bytes, %s)\r\n",
+	       fat_path, (unsigned long)file_size, elf ? "ELF" : "BIN");
 
 	printf("install: erasing app slot...\r\n");
 	HAL_FLASH_Unlock();
@@ -253,49 +449,18 @@ bool boot_app_install_from_file(const char *fat_path)
 		return false;
 	}
 
-	while (total < file_size) {
-		UINT to_read = (UINT)INSTALL_IO_CHUNK;
-
-		if ((file_size - total) < to_read) {
-			to_read = (UINT)(file_size - total);
-		}
-
-		fr = f_read(&fp, s_install_io_buf, to_read, &br);
-		if (fr != FR_OK || br == 0U) {
-			printf("install: read fail @ %lu\r\n", (unsigned long)total);
-			HAL_FLASH_Lock();
-			(void)f_close(&fp);
-			return false;
-		}
-
-		if ((br & 3U) != 0U) {
-			while ((br & 3U) != 0U && br < INSTALL_IO_CHUNK) {
-				s_install_io_buf[br++] = 0xFFU;
-			}
-		}
-
-		if (!flash_program_buffer(addr, s_install_io_buf, br)) {
-			HAL_FLASH_Lock();
-			(void)f_close(&fp);
-			return false;
-		}
-
-		addr += br;
-		total += br;
-
-		if (total >= next_progress || total == file_size) {
-			printf("install: %lu / %lu\r\n", (unsigned long)total, (unsigned long)file_size);
-			while (next_progress <= total) {
-				next_progress += INSTALL_PROGRESS_STEP;
-			}
-		}
-	}
+	ok = elf ? install_elf32(&fp, file_size) : install_raw_bin(&fp, file_size);
 
 	HAL_FLASH_Lock();
 	(void)f_close(&fp);
 
+	if (!ok) {
+		return false;
+	}
+
 	if (!boot_app_is_valid()) {
-		printf("install: image invalid after flash\r\n");
+		printf("install: image invalid after flash (wrong link addr? need APP @ 0x%08lX)\r\n",
+		       (unsigned long)APP_FLASH_BASE);
 		return false;
 	}
 
@@ -304,6 +469,16 @@ bool boot_app_install_from_file(const char *fat_path)
 
 	printf("install: OK\r\n");
 	return true;
+}
+
+void boot_app_reboot_after_install(void)
+{
+	printf("install: rebooting (same as reset after IDE flash)...\r\n");
+	HAL_Delay(30);
+	__disable_irq();
+	HAL_NVIC_SystemReset();
+	for (;;) {
+	}
 }
 
 bool boot_app_install_selected(void)
