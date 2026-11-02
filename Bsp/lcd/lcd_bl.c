@@ -1,7 +1,7 @@
 #include "lcd_bl.h"
 #include "lcd_hw.h"
 #include "ili9341_regs.h"
-#include "font8x8.h"
+#include "font8x16.h"
 #include "main.h"
 #include <string.h>
 
@@ -294,7 +294,7 @@ void lcd_bl_fill_rect(int x, int y, int w, int h, uint16_t color)
 	}
 }
 
-void lcd_bl_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
+void lcd_bl_text_8x16(int x, int y, const char *s, uint16_t fg, uint16_t bg)
 {
 	uint16_t rowbuf[8];
 
@@ -307,9 +307,9 @@ void lcd_bl_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
 		if (c < 32U || c > 126U) {
 			c = '?';
 		}
-		glyph = font8x8_basic[c - 32U];
+		glyph = font8x16_basic[c - 32U];
 
-		for (row = 0; row < 8; row++) {
+		for (row = 0; row < 16; row++) {
 			uint8_t bits = glyph[row];
 			int py = y + row;
 
@@ -317,7 +317,7 @@ void lcd_bl_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
 				continue;
 			}
 			for (col = 0; col < 8; col++) {
-				rowbuf[(uint32_t)col] =
+				rowbuf[7U - (uint32_t)col] =
 					(bits & (0x80U >> (uint32_t)col)) ? fg : bg;
 			}
 			if (x >= 0 && x + 8 <= (int)LCD_WIDTH) {
@@ -327,5 +327,43 @@ void lcd_bl_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
 			}
 		}
 		x += 9;
+	}
+}
+
+void lcd_bl_text_8x16_scale(int x, int y, const char *s, uint16_t fg, uint16_t bg,
+                            uint8_t scale)
+{
+	int cx = x;
+
+	if (scale == 0U) {
+		scale = 1U;
+	}
+
+	while (*s) {
+		unsigned char c = (unsigned char)*s++;
+		const uint8_t *glyph;
+		int row;
+		int col;
+
+		if (c < 32U || c > 126U) {
+			c = '?';
+		}
+		glyph = font8x16_basic[c - 32U];
+
+		for (row = 0; row < 16; row++) {
+			uint8_t bits = glyph[row];
+
+			for (col = 0; col < 8; col++) {
+				uint16_t color = (bits & (0x80U >> (uint32_t)col)) ? fg : bg;
+				int px = cx + col * (int)scale;
+
+				if (color == bg) {
+					continue;
+				}
+				lcd_bl_fill_rect(px, y + row * (int)scale,
+				                 (int)scale, (int)scale, color);
+			}
+		}
+		cx += (int)(9U * scale);
 	}
 }

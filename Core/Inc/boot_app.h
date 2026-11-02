@@ -2,6 +2,11 @@
 #define BOOT_APP_H
 
 #include <stdbool.h>
+#include <stdint.h>
+
+typedef void (*boot_app_progress_fn)(uint8_t percent);
+
+void boot_app_set_progress_handler(boot_app_progress_fn fn);
 
 bool boot_app_is_valid(void);
 void boot_app_log_status(void);

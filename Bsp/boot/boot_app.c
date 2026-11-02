@@ -17,6 +17,40 @@
 static uint8_t s_install_io_buf[INSTALL_IO_CHUNK] __attribute__((aligned(8)));
 
 #define APP_RESET_MAX_OFFSET      (48U * 1024U)
+#define INSTALL_PCT_ERASE         5U
+#define INSTALL_PCT_PROGRAM       95U
+
+static boot_app_progress_fn s_progress_fn;
+static uint32_t s_install_prog_total;
+static uint32_t s_install_prog_done;
+
+void boot_app_set_progress_handler(boot_app_progress_fn fn)
+{
+	s_progress_fn = fn;
+}
+
+static void install_progress_report(uint8_t percent)
+{
+	if (s_progress_fn != NULL) {
+		if (percent > 100U) {
+			percent = 100U;
+		}
+		s_progress_fn(percent);
+	}
+}
+
+static void install_progress_after_program_chunk(void)
+{
+	uint8_t pct;
+
+	if (s_install_prog_total == 0U) {
+		pct = INSTALL_PCT_ERASE;
+	} else {
+		pct = (uint8_t)(INSTALL_PCT_ERASE +
+		                (s_install_prog_done * INSTALL_PCT_PROGRAM) / s_install_prog_total);
+	}
+	install_progress_report(pct);
+}
 
 static bool thumb_reset_in_app_region(uint32_t addr)
 {
@@ -283,10 +317,12 @@ static bool flash_program_file_range(FIL *fp, uint32_t file_off, uint32_t flash_
 		}
 
 		done += br;
+		s_install_prog_done += br;
 		if (done >= next_progress || done == nbytes) {
 			printf("install: %lu / %lu @ 0x%08lX\r\n",
 			       (unsigned long)done, (unsigned long)nbytes,
 			       (unsigned long)flash_addr);
+			install_progress_after_program_chunk();
 			while (next_progress <= done) {
 				next_progress += INSTALL_PROGRESS_STEP;
 			}
@@ -402,6 +438,59 @@ static bool install_elf32(FIL *fp, uint32_t file_size)
 	return true;
 }
 
+static uint32_t elf_flash_load_total(FIL *fp)
+{
+	uint8_t eh[52];
+	UINT br;
+	uint32_t phoff;
+	uint16_t phentsize;
+	uint16_t phnum;
+	uint16_t i;
+	uint32_t total = 0U;
+
+	if (f_lseek(fp, 0) != FR_OK ||
+	    f_read(fp, eh, sizeof(eh), &br) != FR_OK || br != sizeof(eh)) {
+		return 0U;
+	}
+	if (eh[0] != 0x7FU || eh[1] != 'E' || eh[2] != 'L' || eh[3] != 'F') {
+		return 0U;
+	}
+	if (eh[4] != 1U || eh[5] != 1U || rd_le16(eh + 18) != 40U) {
+		return 0U;
+	}
+
+	phoff = rd_le32(eh + 28);
+	phentsize = rd_le16(eh + 42);
+	phnum = rd_le16(eh + 44);
+	if (phentsize < 32U || phnum == 0U || phnum > 32U) {
+		return 0U;
+	}
+
+	for (i = 0U; i < phnum; i++) {
+		uint8_t ph[32];
+		uint32_t p_type;
+		uint32_t p_paddr;
+		uint32_t p_filesz;
+
+		if (f_lseek(fp, phoff + ((uint32_t)i * phentsize)) != FR_OK ||
+		    f_read(fp, ph, 32U, &br) != FR_OK || br != 32U) {
+			return 0U;
+		}
+		p_type = rd_le32(ph + 0);
+		p_paddr = rd_le32(ph + 12);
+		p_filesz = rd_le32(ph + 16);
+		if (p_type != 1U || p_filesz == 0U) {
+			continue;
+		}
+		if (p_paddr >= 0x20000000U ||
+		    (p_paddr >= 0x10000000U && p_paddr < 0x10010000U)) {
+			continue;
+		}
+		total += p_filesz;
+	}
+	return total;
+}
+
 static bool file_is_elf(FIL *fp)
 {
 	uint8_t mag[4];
@@ -438,6 +527,18 @@ bool boot_app_install_from_file(const char *fat_path)
 	printf("install: %s (%lu bytes, %s)\r\n",
 	       fat_path, (unsigned long)file_size, elf ? "ELF" : "BIN");
 
+	s_install_prog_done = 0U;
+	if (elf) {
+		s_install_prog_total = elf_flash_load_total(&fp);
+		if (s_install_prog_total == 0U) {
+			(void)f_close(&fp);
+			return false;
+		}
+	} else {
+		s_install_prog_total = file_size;
+	}
+	install_progress_report(0U);
+
 	printf("install: erasing app slot...\r\n");
 	HAL_FLASH_Unlock();
 	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
@@ -448,6 +549,7 @@ bool boot_app_install_from_file(const char *fat_path)
 		(void)f_close(&fp);
 		return false;
 	}
+	install_progress_report(INSTALL_PCT_ERASE);
 
 	ok = elf ? install_elf32(&fp, file_size) : install_raw_bin(&fp, file_size);
 
@@ -467,6 +569,7 @@ bool boot_app_install_from_file(const char *fat_path)
 	__DSB();
 	__ISB();
 
+	install_progress_report(100U);
 	printf("install: OK\r\n");
 	return true;
 }

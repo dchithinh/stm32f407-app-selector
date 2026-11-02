@@ -1,4 +1,5 @@
 #include "boot_policy.h"
+#include "boot_ui.h"
 #include "boot_app.h"
 #include "boot_layout.h"
 #include "debug_uart.h"
@@ -7,7 +8,6 @@
 
 #define BOOT_HOLD_MS              400U
 #define BOOT_USR_BTN_SAMPLE_MS    5U
-#define BOOT_AUTOBOOT_GRACE_MS    5000U
 
 static bool s_usr_btn_at_reset;
 static bool s_usr_btn_latch;
@@ -27,6 +27,11 @@ static bool boot_uart_got_stay_in_bl(void)
 static bool boot_user_wants_loader_now(void)
 {
 	return boot_usr_btn_pressed() || boot_uart_got_stay_in_bl();
+}
+
+bool boot_policy_user_requests_bootloader(void)
+{
+	return boot_user_wants_loader_now();
 }
 
 static void usr_btn_gpio_init(void)
@@ -104,27 +109,6 @@ void boot_policy_log(void)
 
 bool boot_policy_confirm_autoboot(void)
 {
-	uint32_t until = HAL_GetTick() + BOOT_AUTOBOOT_GRACE_MS;
-	uint32_t last_sec_shown = 0xFFFFFFFFU;
-
-	while (HAL_GetTick() < until) {
-		uint32_t remain_ms = until - HAL_GetTick();
-		uint32_t sec = (remain_ms + 999U) / 1000U;
-
-		if (sec != last_sec_shown) {
-			last_sec_shown = sec;
-			printf("\rPress j or user btn to stop autoboot: %2lu    ",
-			       (unsigned long)sec);
-			fflush(stdout);
-		}
-
-		if (boot_user_wants_loader_now()) {
-			printf("\r\nStay in bootloader (user btn or j).\r\n");
-			return false;
-		}
-		HAL_Delay(5);
-	}
-
-	printf("\r\n");
-	return true;
+	boot_ui_display_init();
+	return boot_ui_autoboot_grace();
 }
