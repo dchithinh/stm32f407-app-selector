@@ -1,10 +1,10 @@
 #include "boot_ui.h"
 #include "boot_app.h"
+#include "boot_loader.h"
 #include "debug_uart.h"
 #include "lcd_bl.h"
 #include "lcd_hw.h"
 #include "sd_apps.h"
-#include "sd_card_test.h"
 #include "sd_spi.h"
 #include "touch_bl.h"
 #include "main.h"
@@ -245,8 +245,8 @@ static void ui_poll_uart(void)
 			ui_draw_list();
 			g_ignore_touch_until = HAL_GetTick() + 250U;
 		}
-	} else if (c == 's' || c == 'S') {
-		(void)sd_card_test_run();
+	} else if (c == 'b' || c == 'B') {
+		boot_mcu_reboot();
 	}
 }
 

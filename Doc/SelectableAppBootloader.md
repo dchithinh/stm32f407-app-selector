@@ -44,14 +44,14 @@ Handoff to the app: set `VTOR` to the app vector table base, reset MSP from the 
 
 ### Enter bootloader
 
-1. **Autoboot grace (5 s):** press **B1** or send **`j`** on USART2 (115200) → stay in bootloader.
-2. **At reset:** hold **B1** through the early sample window → enter bootloader (same as grace intent).
+1. **Autoboot grace (5 s):** press **user button** (PA0) or send **`j`** on USART2 (115200) → stay in bootloader.
+2. **At reset:** hold **user button** through the early sample window → enter bootloader (same as grace intent).
 3. **Invalid app slot** → always bootloader.
 4. **Dev:** `BOOT_FORCE_LOADER` **`1`** in `boot_layout.h` — never autoboot.
 
 From the bootloader menu, send **`a`** to run the app. **`j`** is only for canceling autoboot during grace.
 
-Blue **B1 / PA0**: active-high (R39 pulldown on board); firmware uses **`GPIO_NOPULL`**, not internal pull-up.
+Blue **user button / PA0**: active-high (R39 pulldown on board); firmware uses **`GPIO_NOPULL`**, not internal pull-up.
 
 ### Clock and app handoff (why 84 MHz matched)
 
@@ -74,8 +74,8 @@ Values are initial planning numbers; adjust after sizing the bootloader binary.
 
 | Region | Start | Size (typical) | Notes |
 |--------|--------|----------------|--------|
-| Bootloader | `0x08000000` | **128 KB** | This project (`STM32F407VGTX_FLASH.ld`) |
-| App slot | `0x08020000` | 896 KB | Apps use `STM32F407VGTX_APP.ld` |
+| Bootloader | `0x08000000` | **64 KB** (sectors 0–3) | `STM32F407VGTX_BL.ld` |
+| App slot | `0x08010000` | **960 KB** (sectors 4–11) | Apps use `STM32F407VGTX_APP.ld`; `VECT_TAB_OFFSET = 0x00010000` |
 
 App projects must use a linker script and vector table offset matching the chosen app base. Bootloader and apps should agree on clock and basic HAL expectations at handoff.
 

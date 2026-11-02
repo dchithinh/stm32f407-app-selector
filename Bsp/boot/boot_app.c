@@ -7,8 +7,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#define APP_FLASH_FIRST_SECTOR    5U
-#define APP_FLASH_SECTOR_COUNT    7U
+#define APP_FLASH_FIRST_SECTOR    4U
+#define APP_FLASH_SECTOR_COUNT    8U
 
 static bool thumb_reset_in_app_region(uint32_t addr)
 {
@@ -59,10 +59,11 @@ void boot_app_log_status(void)
 	       (unsigned long)entry,
 	       (unsigned long)(reset & 1U),
 	       thumb_reset_in_app_region(reset) ? "OK" :
-		       "BAD (expect odd addr in 0x08020000..0x080FFFFF)");
+		       "BAD (expect odd addr in app slot range)");
 	if (entry < APP_FLASH_BASE) {
-		printf("  hint: entry below app base — Pomodoro may be linked with\r\n");
-		printf("        STM32F407VGTX_FLASH.ld (0x08000000) not APP.ld (0x08020000)\r\n");
+		printf("  hint: entry below app base — app may be linked with\r\n");
+		printf("        STM32F407VGTX_BL.ld (0x08000000) not APP.ld (0x%08lX)\r\n",
+		       (unsigned long)APP_FLASH_BASE);
 	}
 	if (sp == 0xFFFFFFFFU && reset == 0xFFFFFFFFU) {
 		printf("  hint: flash looks erased — program stm32f407xx_pomodoro.elf\r\n");

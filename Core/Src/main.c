@@ -78,22 +78,20 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-  boot_policy_init_b1_gpio();
+  boot_policy_usr_btn_init();
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  boot_policy_poll_b1_latch();
+  boot_policy_usr_btn_poll();
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
 
   /* USER CODE BEGIN 2 */
-  boot_policy_ensure_b1_gpio();
-  /* Sample B1 before any slow UART — hold B1 from reset through this window. */
   boot_policy_sample_at_reset();
 
   debug_uart_init();
@@ -236,8 +234,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF5_SPI2;
   HAL_GPIO_Init(PDM_OUT_GPIO_Port, &GPIO_InitStruct);
 
-  /* B1 (PA0): configured in boot_policy_* — do not use Cube EXTI/event mode here. */
-
   /*Configure GPIO pin : I2S3_WS_Pin */
   GPIO_InitStruct.Pin = I2S3_WS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
@@ -328,7 +324,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  boot_policy_ensure_b1_gpio();
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
