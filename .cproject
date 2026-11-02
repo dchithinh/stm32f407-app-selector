@@ -51,6 +51,9 @@
 									<listOptionValue builtIn="false" value="../Bsp"/>
 									<listOptionValue builtIn="false" value="../Bsp/boot"/>
 									<listOptionValue builtIn="false" value="../Bsp/sdcard"/>
+									<listOptionValue builtIn="false" value="../Bsp/lcd"/>
+									<listOptionValue builtIn="false" value="../Bsp/touch"/>
+									<listOptionValue builtIn="false" value="../Bsp/ui"/>
 									<listOptionValue builtIn="false" value="../Middlewares/Third_Party/FatFs"/>
 								</option>
 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.1804377225" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
@@ -133,6 +136,9 @@
 									<listOptionValue builtIn="false" value="../Bsp"/>
 									<listOptionValue builtIn="false" value="../Bsp/boot"/>
 									<listOptionValue builtIn="false" value="../Bsp/sdcard"/>
+									<listOptionValue builtIn="false" value="../Bsp/lcd"/>
+									<listOptionValue builtIn="false" value="../Bsp/touch"/>
+									<listOptionValue builtIn="false" value="../Bsp/ui"/>
 									<listOptionValue builtIn="false" value="../Middlewares/Third_Party/FatFs"/>
 								</option>
 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.566401788" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>

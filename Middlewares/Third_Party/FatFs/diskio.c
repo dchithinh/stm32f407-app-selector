@@ -229,10 +229,15 @@ BYTE send_cmd (		/* Return value: R1 resp (bit7==1:Failed to send) */
 		if (res > 1) return res;
 	}
 
-	/* Select the card and wait for ready except to stop multiple block read */
+	/* Select the card. CMD0 must not wait-ready: after reset DO may not be 0xFF. */
 	if (cmd != CMD12) {
 		deselect();
-		if (!_select()) return 0xFF;
+		if (cmd == CMD0) {
+			CS_LOW();
+			xchg_spi(0xFF);
+		} else if (!_select()) {
+			return 0xFF;
+		}
 	}
 
 	/* Send command packet */
@@ -278,35 +283,51 @@ DSTATUS disk_initialize (
 
 	if (drv) return STA_NOINIT;			/* Supports only drive 0 */
 	init_spi();							/* Initialize SPI */
-    sleep_ms(10);
+	sleep_ms(100);
 
 	if (Stat & STA_NODISK) return Stat;	/* Is card existing in the soket? */
 
 	FCLK_SLOW();
-	CS_LOW();
-	for (n = 10; n; n--) xchg_spi(0xFF);	/* Send 80 dummy clocks */
+	CS_HIGH();
+	sd_spi_bus_idle_clocks(80);
 
 	ty = 0;
-	if (send_cmd(CMD0, 0) == 1) {			/* Put the card SPI/Idle state */
-		t = _millis();
-		if (send_cmd(CMD8, 0x1AA) == 1) {	/* SDv2? */
-			for (n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);	/* Get 32 bit return value of R7 resp */
-			if (ocr[2] == 0x01 && ocr[3] == 0xAA) {				/* Is the card supports vcc of 2.7-3.6V? */
-				while (_millis() < t + timeout && send_cmd(ACMD41, 1UL << 30)) ;	/* Wait for end of initialization with ACMD41(HCS) */
-				if (_millis() < t + timeout && send_cmd(CMD58, 0) == 0) {		/* Check CCS bit in the OCR */
-					for (n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);
-					ty = (ocr[0] & 0x40) ? CT_SD2 | CT_BLOCK : CT_SD2;	/* Card id SDv2 */
+	{
+		BYTE cmd0 = 0xFF;
+		BYTE ntry;
+
+		for (ntry = 0; ntry < 20U; ntry++) {
+			cmd0 = send_cmd(CMD0, 0);
+			if (cmd0 == 1U) {
+				break;
+			}
+			sleep_ms(10);
+		}
+
+		if (cmd0 == 1U || cmd0 == 0U) {		/* Idle, or already out of idle */
+			BYTE cmd8;
+
+			t = _millis();
+			cmd8 = send_cmd(CMD8, 0x1AA);
+			if (cmd8 == 1) {	/* SDv2? */
+				for (n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);	/* Get 32 bit return value of R7 resp */
+				if (ocr[2] == 0x01 && ocr[3] == 0xAA) {				/* Is the card supports vcc of 2.7-3.6V? */
+					while (_millis() < t + timeout && send_cmd(ACMD41, 1UL << 30)) ;	/* Wait for end of initialization with ACMD41(HCS) */
+					if (_millis() < t + timeout && send_cmd(CMD58, 0) == 0) {		/* Check CCS bit in the OCR */
+						for (n = 0; n < 4; n++) ocr[n] = xchg_spi(0xFF);
+						ty = (ocr[0] & 0x40) ? CT_SD2 | CT_BLOCK : CT_SD2;	/* Card id SDv2 */
+					}
 				}
+			} else {	/* Not SDv2 card */
+				if (send_cmd(ACMD41, 0) <= 1) 	{	/* SDv1 or MMC? */
+					ty = CT_SD1; cmd = ACMD41;	/* SDv1 (ACMD41(0)) */
+				} else {
+					ty = CT_MMC; cmd = CMD1;	/* MMCv3 (CMD1(0)) */
+				}
+				while (_millis() < t + timeout && send_cmd(cmd, 0)) ;		/* Wait for end of initialization */
+				if (_millis() >= t + timeout || send_cmd(CMD16, 512) != 0)	/* Set block length: 512 */
+					ty = 0;
 			}
-		} else {	/* Not SDv2 card */
-			if (send_cmd(ACMD41, 0) <= 1) 	{	/* SDv1 or MMC? */
-				ty = CT_SD1; cmd = ACMD41;	/* SDv1 (ACMD41(0)) */
-			} else {
-				ty = CT_MMC; cmd = CMD1;	/* MMCv3 (CMD1(0)) */
-			}
-			while (_millis() < t + timeout && send_cmd(cmd, 0)) ;		/* Wait for end of initialization */
-			if (_millis() >= t + timeout || send_cmd(CMD16, 512) != 0)	/* Set block length: 512 */
-				ty = 0;
 		}
 	}
 	CardType = ty;	/* Card type */
