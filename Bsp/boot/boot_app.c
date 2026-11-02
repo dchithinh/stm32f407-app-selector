@@ -10,6 +10,12 @@
 #define APP_FLASH_FIRST_SECTOR    4U
 #define APP_FLASH_SECTOR_COUNT    8U
 
+/* SD/FatFs: larger reads amortize SPI overhead; keep multiple of 512. */
+#define INSTALL_IO_CHUNK          4096U
+#define INSTALL_PROGRESS_STEP     (32U * 1024U)
+
+static uint8_t s_install_io_buf[INSTALL_IO_CHUNK] __attribute__((aligned(8)));
+
 static bool thumb_reset_in_app_region(uint32_t addr)
 {
 	if ((addr & 1U) == 0U) {
@@ -172,7 +178,6 @@ static bool flash_erase_app_slot(void)
 	uint32_t sector_error = 0U;
 	HAL_StatusTypeDef st;
 
-	HAL_FLASH_Unlock();
 	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
 	                       FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
 
@@ -182,26 +187,28 @@ static bool flash_erase_app_slot(void)
 	erase.NbSectors = APP_FLASH_SECTOR_COUNT;
 
 	st = HAL_FLASHEx_Erase(&erase, &sector_error);
-	HAL_FLASH_Lock();
 
 	if (st != HAL_OK) {
-		printf("flash erase failed: st=%d sector_err=%lu\r\n",
-		       (int)st, (unsigned long)sector_error);
+		printf("flash erase failed: st=%d sector_err=%lu hal_err=0x%08lX\r\n",
+		       (int)st, (unsigned long)sector_error,
+		       (unsigned long)HAL_FLASH_GetError());
 		return false;
 	}
 	return true;
 }
 
-static bool flash_program_words(uint32_t addr, const uint8_t *data, uint32_t len)
+static bool flash_program_buffer(uint32_t addr, const uint8_t *data, uint32_t len)
 {
 	uint32_t i;
 
-	for (i = 0; i < len; i += 4U) {
+	for (i = 0U; i < len; i += 4U) {
 		uint32_t word = 0xFFFFFFFFU;
 
 		memcpy(&word, data + i, (len - i >= 4U) ? 4U : (len - i));
 		if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr + i, word) != HAL_OK) {
-			printf("flash program fail @ 0x%08lX\r\n", (unsigned long)(addr + i));
+			printf("flash program fail @ 0x%08lX hal_err=0x%08lX\r\n",
+			       (unsigned long)(addr + i),
+			       (unsigned long)HAL_FLASH_GetError());
 			return false;
 		}
 	}
@@ -213,10 +220,10 @@ bool boot_app_install_from_file(const char *fat_path)
 	FIL fp;
 	FRESULT fr;
 	UINT br;
-	uint8_t buf[512];
 	uint32_t addr = APP_FLASH_BASE;
 	uint32_t total = 0U;
 	uint32_t file_size;
+	uint32_t next_progress = INSTALL_PROGRESS_STEP;
 
 	if (fat_path == NULL || fat_path[0] == '\0') {
 		return false;
@@ -236,23 +243,24 @@ bool boot_app_install_from_file(const char *fat_path)
 	}
 
 	printf("install: erasing app slot...\r\n");
-	if (!flash_erase_app_slot()) {
-		(void)f_close(&fp);
-		return false;
-	}
-
 	HAL_FLASH_Unlock();
 	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR |
 	                       FLASH_FLAG_PGAERR | FLASH_FLAG_PGPERR | FLASH_FLAG_PGSERR);
 
+	if (!flash_erase_app_slot()) {
+		HAL_FLASH_Lock();
+		(void)f_close(&fp);
+		return false;
+	}
+
 	while (total < file_size) {
-		UINT to_read = (UINT)sizeof(buf);
+		UINT to_read = (UINT)INSTALL_IO_CHUNK;
 
 		if ((file_size - total) < to_read) {
 			to_read = (UINT)(file_size - total);
 		}
 
-		fr = f_read(&fp, buf, to_read, &br);
+		fr = f_read(&fp, s_install_io_buf, to_read, &br);
 		if (fr != FR_OK || br == 0U) {
 			printf("install: read fail @ %lu\r\n", (unsigned long)total);
 			HAL_FLASH_Lock();
@@ -261,12 +269,12 @@ bool boot_app_install_from_file(const char *fat_path)
 		}
 
 		if ((br & 3U) != 0U) {
-			while ((br & 3U) != 0U && br < sizeof(buf)) {
-				buf[br++] = 0xFFU;
+			while ((br & 3U) != 0U && br < INSTALL_IO_CHUNK) {
+				s_install_io_buf[br++] = 0xFFU;
 			}
 		}
 
-		if (!flash_program_words(addr, buf, br)) {
+		if (!flash_program_buffer(addr, s_install_io_buf, br)) {
 			HAL_FLASH_Lock();
 			(void)f_close(&fp);
 			return false;
@@ -274,7 +282,13 @@ bool boot_app_install_from_file(const char *fat_path)
 
 		addr += br;
 		total += br;
-		printf("install: %lu / %lu\r\n", (unsigned long)total, (unsigned long)file_size);
+
+		if (total >= next_progress || total == file_size) {
+			printf("install: %lu / %lu\r\n", (unsigned long)total, (unsigned long)file_size);
+			while (next_progress <= total) {
+				next_progress += INSTALL_PROGRESS_STEP;
+			}
+		}
 	}
 
 	HAL_FLASH_Lock();
