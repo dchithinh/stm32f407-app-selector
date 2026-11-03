@@ -576,7 +576,7 @@ bool boot_app_install_from_file(const char *fat_path)
 
 void boot_app_reboot_after_install(void)
 {
-	printf("install: rebooting (same as reset after IDE flash)...\r\n");
+	printf("Installed: rebooting...\r\n");
 	HAL_Delay(30);
 	__disable_irq();
 	HAL_NVIC_SystemReset();

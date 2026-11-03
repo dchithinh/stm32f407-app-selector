@@ -7,7 +7,7 @@
 static void boot_loader_print_help(void)
 {
 	printf("Bootloader (LCD menu active):\r\n");
-	printf("  touch = select app / Install & Run\r\n");
+	printf("  touch = select app / Reboot or Install\r\n");
 	printf("  a = run flashed app (if valid)\r\n");
 	printf("  r = rescan SD apps\r\n");
 	printf("  b = reboot MCU\r\n");

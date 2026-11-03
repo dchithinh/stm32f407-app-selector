@@ -5,7 +5,7 @@
 #include "main.h"
 #include "boot_layout.h"
 
-#define BOOT_AUTOBOOT_GRACE_MS    5000U
+#define BOOT_AUTOBOOT_GRACE_MS    10000U
 
 static inline bool boot_usr_btn_pressed(void)
 {

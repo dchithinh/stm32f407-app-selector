@@ -21,8 +21,9 @@
 #define COL_ROW         LCD_COLOR(36, 44, 92)    /* list card */
 #define COL_ROW_SEL     LCD_COLOR(32, 109, 224)  /* #206DE0 selected row */
 #define COL_ACCENT      LCD_COLOR(32, 109, 224)  /* primary button */
-#define COL_BAR_BG      LCD_COLOR(28, 34, 78)
 #define COL_BAR_FILL    LCD_COLOR(32, 109, 224)
+#define COL_BAR_TRACK   LCD_COLOR(14, 17, 42)
+#define COL_BAR_BORDER  COL_RULE
 #define COL_TEXT        LCD_COLOR(232, 235, 245) /* on dark surfaces */
 #define COL_TEXT_ON_DARK LCD_COLOR(255, 255, 255)
 #define COL_TEXT_DIM    LCD_COLOR(120, 130, 168)
@@ -31,6 +32,7 @@
 /* Pressed: same blue family, slightly darker (not white flash). */
 #define COL_BTN_PRESS_BG LCD_COLOR(22, 78, 176)
 #define COL_BTN_PRESS_FG COL_TEXT_ON_DARK
+#define COL_BTN_DISABLED LCD_COLOR(40, 48, 88)
 
 #define UI_HEADER_RULE  2
 
@@ -41,15 +43,18 @@
 #define UI_ROW_Y0           40
 #define UI_VISIBLE_ROWS     5U
 #define UI_BTN_X            0
-#define UI_BTN_Y            268
-#define UI_BTN_W            LCD_WIDTH
 #define UI_BTN_H            40
+#define UI_BTN_Y            ((int)LCD_HEIGHT - UI_BTN_H)
+#define UI_BTN_W            LCD_WIDTH
 #define UI_BODY_Y           80
-#define UI_BAR_X            16
-#define UI_BAR_Y            124
-#define UI_BAR_W            (LCD_WIDTH - 32)
-#define UI_BAR_H            20
-#define UI_PCT_Y            (UI_BAR_Y - UI_FONT_H - 6)
+#define UI_INSTALL_NAME_Y   (UI_TITLE_H + 10)
+#define UI_BAR_X            12
+#define UI_BAR_Y            152
+#define UI_BAR_W            (LCD_WIDTH - 24)
+#define UI_BAR_H            28
+#define UI_BAR_BORDER       2
+#define UI_PCT_ABOVE_BAR    12
+#define UI_PCT_Y            (UI_BAR_Y - UI_FONT_H - UI_PCT_ABOVE_BAR)
 
 #define UI_AUTO_CARD_X          0
 #define UI_AUTO_CARD_Y          UI_TITLE_H
@@ -61,8 +66,18 @@
 #define UI_AUTO_COUNT_Y_BIAS    (-14)
 
 #define UI_SCROLL_X         168
+#define UI_BTN_GAP          4
+#define UI_BTN_CELL_W       (((int)LCD_WIDTH - UI_BTN_GAP) / 2)
+#define UI_BTN_REBOOT_X     0
+#define UI_BTN_INSTALL_X    (UI_BTN_CELL_W + UI_BTN_GAP)
 
 static bool s_display_ready;
+
+typedef enum {
+	UI_LIST_BTN_NONE = 0,
+	UI_LIST_BTN_REBOOT,
+	UI_LIST_BTN_INSTALL,
+} ui_list_btn_t;
 
 typedef enum {
 	UI_SCREEN_LIST,
@@ -81,7 +96,10 @@ static bool g_touch_down;
 static int16_t g_last_x;
 static int16_t g_last_y;
 static uint32_t g_ignore_touch_until;
-static bool g_action_btn_pressed;
+static ui_list_btn_t g_list_btn_pressed;
+static bool g_msg_btn_pressed;
+
+static bool point_in_rect(int16_t x, int16_t y, int rx, int ry, int rw, int rh);
 
 static int ui_text_y_center(int top, int h)
 {
@@ -117,11 +135,58 @@ static void ui_text_in_bar_centered(const char *s, uint16_t fg, uint16_t bg)
 }
 
 static bool ui_hit_install_btn(int16_t x, int16_t y);
+static bool ui_hit_reboot_btn(int16_t x, int16_t y);
 
-static void ui_button_label_ex(const char *label, uint16_t fg, uint16_t bg)
+static bool ui_install_enabled(void)
+{
+	return g_selected >= 0 && g_apps.count > 0U;
+}
+
+static void ui_draw_half_button(int x, int w, const char *label, bool enabled,
+                                bool pressed)
+{
+	uint16_t bg;
+	uint16_t fg;
+	int tw;
+	int tx;
+	int ty;
+
+	if (!enabled) {
+		bg = COL_BTN_DISABLED;
+		fg = COL_TEXT_DIM;
+	} else if (pressed) {
+		bg = COL_BTN_PRESS_BG;
+		fg = COL_BTN_PRESS_FG;
+	} else {
+		bg = COL_ACCENT;
+		fg = COL_TEXT_ON_DARK;
+	}
+
+	tw = ui_text_width(label);
+	tx = x + (w - tw) / 2;
+	ty = ui_text_y_center(UI_BTN_Y, UI_BTN_H);
+
+	lcd_bl_fill_rect(x, UI_BTN_Y, w, UI_BTN_H, bg);
+	lcd_bl_text_8x16(tx, ty, label, fg, bg);
+}
+
+static void ui_draw_list_buttons(void)
+{
+	int div_x = UI_BTN_CELL_W + (UI_BTN_GAP / 2);
+	bool install_on = ui_install_enabled();
+
+	lcd_bl_fill_rect(UI_BTN_CELL_W, UI_BTN_Y, UI_BTN_GAP, UI_BTN_H, COL_SCR_BG);
+	ui_draw_half_button(UI_BTN_REBOOT_X, UI_BTN_CELL_W, "Reboot", true,
+	                    g_list_btn_pressed == UI_LIST_BTN_REBOOT);
+	ui_draw_half_button(UI_BTN_INSTALL_X, UI_BTN_CELL_W, "Install", install_on,
+	                    install_on && g_list_btn_pressed == UI_LIST_BTN_INSTALL);
+	lcd_bl_fill_rect(div_x, UI_BTN_Y, 1, UI_BTN_H, COL_HEADER);
+}
+
+static void ui_button_label_ex(int x, int w, const char *label, uint16_t fg, uint16_t bg)
 {
 	int tw = ui_text_width(label);
-	int tx = UI_BTN_X + (((int)UI_BTN_W - tw) / 2);
+	int tx = x + (w - tw) / 2;
 	int ty = ui_text_y_center(UI_BTN_Y, UI_BTN_H);
 
 	lcd_bl_text_8x16(tx, ty, label, fg, bg);
@@ -133,27 +198,45 @@ static void ui_draw_action_button(const char *label, bool pressed)
 	uint16_t fg = pressed ? COL_BTN_PRESS_FG : COL_TEXT_ON_DARK;
 
 	lcd_bl_fill_rect(UI_BTN_X, UI_BTN_Y, UI_BTN_W, UI_BTN_H, bg);
-	ui_button_label_ex(label, fg, bg);
-}
-
-static void ui_button_label(const char *label, uint16_t fg, uint16_t bg)
-{
-	ui_button_label_ex(label, fg, bg);
+	ui_button_label_ex(UI_BTN_X, (int)UI_BTN_W, label, fg, bg);
 }
 
 static const char *ui_screen_button_label(void)
 {
-	if (g_screen == UI_SCREEN_LIST) {
-		return "Install & Run";
-	}
 	if (g_screen == UI_SCREEN_MSG) {
 		return "Back";
 	}
 	return NULL;
 }
 
+static ui_list_btn_t ui_list_button_at(int16_t x, int16_t y)
+{
+	if (!point_in_rect(x, y, UI_BTN_X, UI_BTN_Y, (int)UI_BTN_W, UI_BTN_H)) {
+		return UI_LIST_BTN_NONE;
+	}
+	if (ui_hit_reboot_btn(x, y)) {
+		return UI_LIST_BTN_REBOOT;
+	}
+	if (ui_install_enabled() && ui_hit_install_btn(x, y)) {
+		return UI_LIST_BTN_INSTALL;
+	}
+	return UI_LIST_BTN_NONE;
+}
+
 static void ui_action_button_press_visual(int16_t x, int16_t y, bool finger_down)
 {
+	ui_list_btn_t hit;
+
+	if (g_screen == UI_SCREEN_LIST) {
+		hit = finger_down ? ui_list_button_at(x, y) : UI_LIST_BTN_NONE;
+		if (hit == g_list_btn_pressed) {
+			return;
+		}
+		g_list_btn_pressed = hit;
+		ui_draw_list_buttons();
+		return;
+	}
+
 	const char *label = ui_screen_button_label();
 	bool on_btn;
 	bool pressed;
@@ -162,13 +245,12 @@ static void ui_action_button_press_visual(int16_t x, int16_t y, bool finger_down
 		return;
 	}
 
-	on_btn = ui_hit_install_btn(x, y);
+	on_btn = point_in_rect(x, y, UI_BTN_X, UI_BTN_Y, (int)UI_BTN_W, UI_BTN_H);
 	pressed = finger_down && on_btn;
-	if (pressed == g_action_btn_pressed) {
+	if (pressed == g_msg_btn_pressed) {
 		return;
 	}
-
-	g_action_btn_pressed = pressed;
+	g_msg_btn_pressed = pressed;
 	ui_draw_action_button(label, pressed);
 }
 
@@ -249,6 +331,7 @@ static void ui_set_selected(int app_idx)
 		ui_redraw_app_row(prev);
 	}
 	ui_redraw_app_row(app_idx);
+	ui_draw_list_buttons();
 }
 
 static void ui_draw_list(void)
@@ -273,8 +356,8 @@ static void ui_draw_list(void)
 		        COL_TEXT_DIM, COL_SCR_BG);
 	}
 
-	g_action_btn_pressed = false;
-	ui_draw_action_button("Install & Run", false);
+	g_list_btn_pressed = UI_LIST_BTN_NONE;
+	ui_draw_list_buttons();
 }
 
 static void ui_draw_message(const char *title, const char *body)
@@ -284,7 +367,7 @@ static void ui_draw_message(const char *title, const char *body)
 	lcd_bl_fill_rect(0, UI_TITLE_H - UI_HEADER_RULE, LCD_WIDTH, UI_HEADER_RULE, COL_RULE);
 	ui_text_in_bar(8, title, COL_TEXT_ON_DARK, COL_HEADER);
 	ui_text(8, UI_BODY_Y, body, COL_TEXT, COL_SCR_BG);
-	g_action_btn_pressed = false;
+	g_msg_btn_pressed = false;
 	ui_draw_action_button("Back", false);
 }
 
@@ -296,7 +379,7 @@ static void ui_draw_install_screen(void)
 	lcd_bl_fill_rect(0, 0, LCD_WIDTH, UI_TITLE_H, COL_HEADER);
 	lcd_bl_fill_rect(0, UI_TITLE_H - UI_HEADER_RULE, LCD_WIDTH, UI_HEADER_RULE, COL_RULE);
 	ui_text_in_bar(8, "Installing...", COL_TEXT_ON_DARK, COL_HEADER);
-	ui_text(8, UI_BODY_Y, g_install_name, COL_TEXT, COL_SCR_BG);
+	ui_text(8, UI_INSTALL_NAME_Y, g_install_name, COL_TEXT, COL_SCR_BG);
 	ui_update_install_bar(0U);
 }
 
@@ -306,6 +389,15 @@ static void ui_update_install_bar(uint8_t percent)
 	uint16_t fill_w;
 	int tw;
 	int tx;
+	int bx = (int)UI_BAR_X;
+	int by = (int)UI_BAR_Y;
+	int bw = (int)UI_BAR_W;
+	int bh = (int)UI_BAR_H;
+	int bd = (int)UI_BAR_BORDER;
+	int inner_x = bx + bd;
+	int inner_y = by + bd;
+	int inner_w = bw - 2 * bd;
+	int inner_h = bh - 2 * bd;
 
 	if (percent > 100U) {
 		percent = 100U;
@@ -313,19 +405,17 @@ static void ui_update_install_bar(uint8_t percent)
 
 	snprintf(pct_line, sizeof(pct_line), "%u%%", (unsigned)percent);
 	tw = ui_text_width(pct_line);
-	tx = (int)UI_BAR_X + ((int)UI_BAR_W - tw) / 2;
+	tx = bx + (bw - tw) / 2;
 
-	lcd_bl_fill_rect((int)UI_BAR_X, UI_PCT_Y - 2, (int)UI_BAR_W,
-	                 UI_FONT_H + 4, COL_SCR_BG);
-	lcd_bl_fill_rect((int)UI_BAR_X, (int)UI_BAR_Y, (int)UI_BAR_W,
-	                 (int)UI_BAR_H, COL_BAR_BG);
-	fill_w = (uint16_t)((UI_BAR_W * (uint32_t)percent) / 100U);
+	lcd_bl_fill_rect(bx, UI_PCT_Y - 2, bw, UI_FONT_H + 4, COL_SCR_BG);
+	lcd_bl_fill_rect(bx, by, bw, bh, COL_BAR_BORDER);
+	lcd_bl_fill_rect(inner_x, inner_y, inner_w, inner_h, COL_BAR_TRACK);
+	fill_w = (uint16_t)((inner_w * (uint32_t)percent) / 100U);
 	if (fill_w > 0U) {
-		lcd_bl_fill_rect((int)UI_BAR_X, (int)UI_BAR_Y, (int)fill_w,
-		                 (int)UI_BAR_H, COL_BAR_FILL);
+		lcd_bl_fill_rect(inner_x, inner_y, (int)fill_w, inner_h, COL_BAR_FILL);
 	}
 
-	ui_text(tx, UI_PCT_Y, pct_line, COL_TEXT, COL_SCR_BG);
+	ui_text(tx, UI_PCT_Y, pct_line, COL_TEXT_ON_DARK, COL_SCR_BG);
 }
 
 static void ui_on_install_progress(uint8_t percent)
@@ -352,7 +442,7 @@ static void ui_draw_autoboot_stay_button(bool pressed)
 	uint16_t fg = pressed ? COL_BTN_PRESS_FG : COL_TEXT_ON_DARK;
 
 	lcd_bl_fill_rect(UI_BTN_X, UI_BTN_Y, UI_BTN_W, UI_BTN_H, bg);
-	ui_button_label_ex("BOOT MENU", fg, bg);
+	ui_button_label_ex(UI_BTN_X, (int)UI_BTN_W, "BOOT MENU", fg, bg);
 }
 
 static void ui_draw_autoboot_frame(void)
@@ -484,14 +574,35 @@ static void ui_handle_message_tap(int16_t x, int16_t y)
 	}
 }
 
+static bool ui_hit_reboot_btn(int16_t x, int16_t y)
+{
+	return point_in_rect(x, y, UI_BTN_REBOOT_X, UI_BTN_Y,
+	                     UI_BTN_CELL_W, UI_BTN_H);
+}
+
 static bool ui_hit_install_btn(int16_t x, int16_t y)
 {
-	return point_in_rect(x, y, UI_BTN_X, UI_BTN_Y, (int)UI_BTN_W, UI_BTN_H);
+	return point_in_rect(x, y, UI_BTN_INSTALL_X, UI_BTN_Y,
+	                     UI_BTN_CELL_W, UI_BTN_H);
+}
+
+static void ui_do_reboot(void)
+{
+	printf("UI: Reboot\r\n");
+	if (boot_app_is_valid()) {
+		boot_jump_to_app();
+	}
+	boot_mcu_reboot();
 }
 
 static void ui_handle_list_tap(int16_t x, int16_t y)
 {
 	int i;
+
+	if (ui_hit_reboot_btn(x, y)) {
+		ui_do_reboot();
+		return;
+	}
 
 	if (point_in_rect(x, y, UI_SCROLL_X, UI_ROW_Y0 + 4, 64, UI_ROW_H * 2)) {
 		if (g_scroll > 0) {
@@ -523,9 +634,8 @@ static void ui_handle_list_tap(int16_t x, int16_t y)
 		}
 	}
 
-	if (ui_hit_install_btn(x, y)) {
+	if (ui_install_enabled() && ui_hit_install_btn(x, y)) {
 		if (g_selected < 0 || g_apps.count == 0U) {
-			printf("UI: tap install but no selection (%d,%d)\r\n", (int)x, (int)y);
 			return;
 		}
 		strncpy(g_install_name, g_apps.items[g_selected].name, sizeof(g_install_name) - 1U);
@@ -558,11 +668,12 @@ static void ui_poll_touch(void)
 
 	if (!touch_bl_read(&x, &y, &pressed)) {
 		if (g_touch_down) {
-			if (g_action_btn_pressed) {
-				g_action_btn_pressed = false;
-				if (ui_screen_button_label() != NULL) {
-					ui_draw_action_button(ui_screen_button_label(), false);
-				}
+			if (g_screen == UI_SCREEN_LIST && g_list_btn_pressed != UI_LIST_BTN_NONE) {
+				g_list_btn_pressed = UI_LIST_BTN_NONE;
+				ui_draw_list_buttons();
+			} else if (g_screen == UI_SCREEN_MSG && g_msg_btn_pressed) {
+				g_msg_btn_pressed = false;
+				ui_draw_action_button("Back", false);
 			}
 			if (HAL_GetTick() >= g_ignore_touch_until) {
 				if (g_screen == UI_SCREEN_LIST) {

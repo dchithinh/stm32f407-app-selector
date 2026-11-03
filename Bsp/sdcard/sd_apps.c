@@ -42,6 +42,27 @@ static void strip_known_ext(char *dst, size_t dst_len, const char *fname)
 	dst[copy] = '\0';
 }
 
+static bool sd_app_make_path(char *path, size_t path_sz, const char *fname)
+{
+	size_t fn_max;
+	size_t fn_len;
+
+	if (path_sz < 2U) {
+		return false;
+	}
+	/* Room for SD_APPS_DIR, '/', fname, and NUL. */
+	fn_max = path_sz - strlen(SD_APPS_DIR) - 2U;
+	if (fn_max == 0U) {
+		return false;
+	}
+	fn_len = strlen(fname);
+	if (fn_len > fn_max) {
+		return false;
+	}
+	(void)snprintf(path, path_sz, "%s/%.*s", SD_APPS_DIR, (int)fn_max, fname);
+	return true;
+}
+
 bool sd_apps_mount(void)
 {
 	FRESULT fr;
@@ -113,7 +134,9 @@ bool sd_apps_scan(sd_app_list_t *out)
 		{
 			sd_app_entry_t *e = &out->items[out->count];
 
-			snprintf(e->path, sizeof(e->path), "%s/%s", SD_APPS_DIR, fno.fname);
+			if (!sd_app_make_path(e->path, sizeof(e->path), fno.fname)) {
+				continue;
+			}
 			strip_known_ext(e->name, sizeof(e->name), fno.fname);
 			e->size = fno.fsize;
 			out->count++;

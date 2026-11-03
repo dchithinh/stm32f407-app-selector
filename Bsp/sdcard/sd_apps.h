@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define SD_APPS_MAX           12U
+#define SD_APPS_MAX           100U
 #define SD_APPS_DIR           "/apps"
 #define SD_APP_NAME_LEN       28U
 #define SD_APP_PATH_LEN       48U
