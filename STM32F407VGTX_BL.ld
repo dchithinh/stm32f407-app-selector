@@ -6,8 +6,9 @@ ENTRY(Reset_Handler)
 
 _estack = ORIGIN(RAM) + LENGTH(RAM);
 
-_Min_Heap_Size = 0x1000;
-_Min_Stack_Size = 0x400;
+_Min_Heap_Size = 0x800;
+/* Install path uses FatFs FIL (~600 B) + nested f_read/printf; 1 KiB stack overflowed. */
+_Min_Stack_Size = 0x2000;
 
 MEMORY
 {

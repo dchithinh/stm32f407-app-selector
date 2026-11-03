@@ -6,7 +6,7 @@ Selectable-application **bootloader** for **STM32F407** on the [2.4" TFT HAT](ht
 
 - FAT microSD catalog under `/apps/` (`.bin` or ARM **ELF32**)
 - Touch UI to pick an image, program internal flash, then run the app
-- **Autoboot** into a valid flashed app after a 5 s grace period
+- **Autoboot** into a valid flashed app after a 10 s grace period
 - Debug console on **USART2** (PA2/PA3, **115200** 8N1)
 
 ## Flash layout (STM32F407VG, 1 MB)
@@ -20,26 +20,26 @@ Constants are in `Core/Inc/boot_layout.h`.
 
 ## Build and flash (bootloader)
 
-1. Open the project in **STM32CubeIDE** (`stm32f4xx_sel_app_bl.ioc`).
+1. Open the project in **STM32CubeIDE**.
 2. Build **Debug** or **Release** (linker script is `STM32F407VGTX_BL.ld`).
 3. Program the MCU at **`0x08000000`** via ST-Link (full chip or bootloader region only).
 
-Output example: `Debug/stm32f4xx_sel_app_bl.elf` (and `.bin` if post-build steps emit one).
-
 ## SD card
 
-Format the card **FAT** (FAT32 is typical). Create:
+Format the card **FAT32**. Create:
 
 ```
 /apps/
   my_app.bin
-  my_app.elf
+  my_app1.elf
 ```
 
 | File type | Behavior |
 |-----------|----------|
 | **`.bin`** | Raw image written starting at `0x08010000`. Size must be ≤ 960 KB. |
 | **`.elf`** | Only **PT_LOAD** segments that map to internal flash are programmed; RAM/CCM loads are skipped. The linked flash base must still be **`0x08010000`**. |
+
+The menu lists at most **100** installable files (`.bin`/`.elf`) from `/apps/` (`SD_APPS_MAX` in `Bsp/sdcard/sd_apps.h`). Additional matching files are **ignored** during scan (no error on UART); remove or rename extras if you need a different set visible.
 
 After a successful install from the UI, the bootloader **resets** and then autoboots or shows the menu according to policy.
 

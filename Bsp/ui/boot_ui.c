@@ -99,6 +99,10 @@ static uint32_t g_ignore_touch_until;
 static ui_list_btn_t g_list_btn_pressed;
 static bool g_msg_btn_pressed;
 
+/* Install progress: incremental bar draw (avoid full track redraw flicker). */
+static uint8_t g_install_bar_pct = 0xFFU;
+static int g_install_bar_fill_px;
+
 static bool point_in_rect(int16_t x, int16_t y, int rx, int ry, int rw, int rh);
 
 static int ui_text_y_center(int top, int h)
@@ -373,6 +377,128 @@ static void ui_draw_message(const char *title, const char *body)
 
 static void ui_update_install_bar(uint8_t percent);
 
+static void ui_install_bar_geometry(int *bx, int *by, int *bw, int *bh, int *bd,
+                                    int *inner_x, int *inner_y, int *inner_w,
+                                    int *inner_h)
+{
+	*bx = (int)UI_BAR_X;
+	*by = (int)UI_BAR_Y;
+	*bw = (int)UI_BAR_W;
+	*bh = (int)UI_BAR_H;
+	*bd = (int)UI_BAR_BORDER;
+	*inner_x = *bx + *bd;
+	*inner_y = *by + *bd;
+	*inner_w = *bw - 2 * (*bd);
+	*inner_h = *bh - 2 * (*bd);
+}
+
+static void ui_draw_install_bar_frame(void)
+{
+	int bx;
+	int by;
+	int bw;
+	int bh;
+	int bd;
+	int inner_x;
+	int inner_y;
+	int inner_w;
+	int inner_h;
+	int pct_slot_w;
+	int pct_x;
+
+	ui_install_bar_geometry(&bx, &by, &bw, &bh, &bd, &inner_x, &inner_y, &inner_w,
+	                        &inner_h);
+
+	lcd_bl_fill_rect(bx, by, bw, bh, COL_BAR_BORDER);
+	lcd_bl_fill_rect(inner_x, inner_y, inner_w, inner_h, COL_BAR_TRACK);
+
+	pct_slot_w = ui_text_width("100%");
+	pct_x = bx + (bw - pct_slot_w) / 2;
+	lcd_bl_fill_rect(pct_x, UI_PCT_Y - 2, pct_slot_w, UI_FONT_H + 4, COL_SCR_BG);
+}
+
+static void ui_update_install_pct_label(uint8_t percent)
+{
+	char pct_line[8];
+	int bx;
+	int by;
+	int bw;
+	int bh;
+	int bd;
+	int inner_x;
+	int inner_y;
+	int inner_w;
+	int inner_h;
+	int pct_slot_w;
+	int pct_x;
+	int tw;
+	int tx;
+
+	ui_install_bar_geometry(&bx, &by, &bw, &bh, &bd, &inner_x, &inner_y, &inner_w,
+	                        &inner_h);
+	(void)inner_x;
+	(void)inner_y;
+	(void)inner_w;
+	(void)inner_h;
+	(void)bd;
+	(void)by;
+
+	snprintf(pct_line, sizeof(pct_line), "%u%%", (unsigned)percent);
+	pct_slot_w = ui_text_width("100%");
+	pct_x = bx + (bw - pct_slot_w) / 2;
+	tw = ui_text_width(pct_line);
+	tx = pct_x + (pct_slot_w - tw) / 2;
+
+	lcd_bl_fill_rect(pct_x, UI_PCT_Y - 2, pct_slot_w, UI_FONT_H + 4, COL_SCR_BG);
+	ui_text(tx, UI_PCT_Y, pct_line, COL_TEXT_ON_DARK, COL_SCR_BG);
+}
+
+static void ui_update_install_bar_fill(uint8_t percent)
+{
+	int bx;
+	int by;
+	int bw;
+	int bh;
+	int bd;
+	int inner_x;
+	int inner_y;
+	int inner_w;
+	int inner_h;
+	int new_fill;
+	int delta;
+
+	if (percent > 100U) {
+		percent = 100U;
+	}
+
+	ui_install_bar_geometry(&bx, &by, &bw, &bh, &bd, &inner_x, &inner_y, &inner_w,
+	                        &inner_h);
+	(void)bx;
+	(void)by;
+	(void)bw;
+	(void)bh;
+	(void)bd;
+
+	new_fill = (inner_w * (int)percent) / 100;
+	if (new_fill < 0) {
+		new_fill = 0;
+	}
+	if (new_fill > inner_w) {
+		new_fill = inner_w;
+	}
+
+	if (new_fill > g_install_bar_fill_px) {
+		delta = new_fill - g_install_bar_fill_px;
+		lcd_bl_fill_rect(inner_x + g_install_bar_fill_px, inner_y, delta, inner_h,
+		                 COL_BAR_FILL);
+		g_install_bar_fill_px = new_fill;
+	} else if (new_fill < g_install_bar_fill_px) {
+		delta = g_install_bar_fill_px - new_fill;
+		lcd_bl_fill_rect(inner_x + new_fill, inner_y, delta, inner_h, COL_BAR_TRACK);
+		g_install_bar_fill_px = new_fill;
+	}
+}
+
 static void ui_draw_install_screen(void)
 {
 	lcd_bl_fill_screen(COL_SCR_BG);
@@ -380,42 +506,23 @@ static void ui_draw_install_screen(void)
 	lcd_bl_fill_rect(0, UI_TITLE_H - UI_HEADER_RULE, LCD_WIDTH, UI_HEADER_RULE, COL_RULE);
 	ui_text_in_bar(8, "Installing...", COL_TEXT_ON_DARK, COL_HEADER);
 	ui_text(8, UI_INSTALL_NAME_Y, g_install_name, COL_TEXT, COL_SCR_BG);
-	ui_update_install_bar(0U);
+	g_install_bar_pct = 0xFFU;
+	g_install_bar_fill_px = 0;
+	ui_draw_install_bar_frame();
+	ui_update_install_pct_label(0U);
 }
 
 static void ui_update_install_bar(uint8_t percent)
 {
-	char pct_line[8];
-	uint16_t fill_w;
-	int tw;
-	int tx;
-	int bx = (int)UI_BAR_X;
-	int by = (int)UI_BAR_Y;
-	int bw = (int)UI_BAR_W;
-	int bh = (int)UI_BAR_H;
-	int bd = (int)UI_BAR_BORDER;
-	int inner_x = bx + bd;
-	int inner_y = by + bd;
-	int inner_w = bw - 2 * bd;
-	int inner_h = bh - 2 * bd;
-
 	if (percent > 100U) {
 		percent = 100U;
 	}
-
-	snprintf(pct_line, sizeof(pct_line), "%u%%", (unsigned)percent);
-	tw = ui_text_width(pct_line);
-	tx = bx + (bw - tw) / 2;
-
-	lcd_bl_fill_rect(bx, UI_PCT_Y - 2, bw, UI_FONT_H + 4, COL_SCR_BG);
-	lcd_bl_fill_rect(bx, by, bw, bh, COL_BAR_BORDER);
-	lcd_bl_fill_rect(inner_x, inner_y, inner_w, inner_h, COL_BAR_TRACK);
-	fill_w = (uint16_t)((inner_w * (uint32_t)percent) / 100U);
-	if (fill_w > 0U) {
-		lcd_bl_fill_rect(inner_x, inner_y, (int)fill_w, inner_h, COL_BAR_FILL);
+	if (percent == g_install_bar_pct) {
+		return;
 	}
-
-	ui_text(tx, UI_PCT_Y, pct_line, COL_TEXT_ON_DARK, COL_SCR_BG);
+	ui_update_install_bar_fill(percent);
+	ui_update_install_pct_label(percent);
+	g_install_bar_pct = percent;
 }
 
 static void ui_on_install_progress(uint8_t percent)

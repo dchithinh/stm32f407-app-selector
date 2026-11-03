@@ -14,6 +14,8 @@ SPI_HandleTypeDef hspi2;
 DMA_HandleTypeDef hdma_spi2_tx;
 #endif
 
+static bool s_lcd_force_cpu_pixels;
+
 static SPI_TypeDef *const lcd_spi = LCD_SPI;
 
 #define CS_L()  HAL_GPIO_WritePin(LCD_CS_PORT, LCD_CS_PIN, GPIO_PIN_RESET)
@@ -169,6 +171,11 @@ void lcd_bl_spi_irq_handler(void)
 	HAL_SPI_IRQHandler(&hspi2);
 }
 
+void lcd_bl_force_cpu_pixels(bool force)
+{
+	s_lcd_force_cpu_pixels = force;
+}
+
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
 	(void)hspi;
@@ -228,8 +235,16 @@ static void lcd_bl_write_pixels(const uint16_t *pixels, uint32_t count)
 	__HAL_SPI_CLEAR_OVRFLAG(&hspi2);
 
 #if LCD_USE_SPI_DMA
-	if (HAL_SPI_Transmit_DMA(&hspi2, (uint8_t *)wire, (uint16_t)count) == HAL_OK) {
+	if (!s_lcd_force_cpu_pixels &&
+	    HAL_SPI_Transmit_DMA(&hspi2, (uint8_t *)wire, (uint16_t)count) == HAL_OK) {
+		uint32_t t0 = HAL_GetTick();
+
 		while (hspi2.State != HAL_SPI_STATE_READY) {
+			if ((HAL_GetTick() - t0) > 500U) {
+				HAL_SPI_ErrorCallback(&hspi2);
+				lcd_spi_write16_cpu(wire, count);
+				break;
+			}
 		}
 	} else {
 		lcd_spi_write16_cpu(wire, count);

@@ -1,6 +1,7 @@
 #include "boot_app.h"
 #include "boot_layout.h"
 #include "ff.h"
+#include "lcd_bl.h"
 #include "sd_apps.h"
 #include "sd_spi.h"
 #include "stm32f4xx_hal.h"
@@ -16,6 +17,9 @@
 
 static uint8_t s_install_io_buf[INSTALL_IO_CHUNK] __attribute__((aligned(8)));
 
+/* FIL is ~600 bytes; keep off the 2 KiB bootloader stack. */
+static FIL s_install_fp;
+
 #define APP_RESET_MAX_OFFSET      (48U * 1024U)
 #define INSTALL_PCT_ERASE         5U
 #define INSTALL_PCT_PROGRAM       95U
@@ -23,6 +27,7 @@ static uint8_t s_install_io_buf[INSTALL_IO_CHUNK] __attribute__((aligned(8)));
 static boot_app_progress_fn s_progress_fn;
 static uint32_t s_install_prog_total;
 static uint32_t s_install_prog_done;
+static uint8_t s_progress_pct_last = 0xFFU;
 
 void boot_app_set_progress_handler(boot_app_progress_fn fn)
 {
@@ -31,10 +36,14 @@ void boot_app_set_progress_handler(boot_app_progress_fn fn)
 
 static void install_progress_report(uint8_t percent)
 {
+	if (percent > 100U) {
+		percent = 100U;
+	}
+	if (percent != 100U && percent == s_progress_pct_last) {
+		return;
+	}
+	s_progress_pct_last = percent;
 	if (s_progress_fn != NULL) {
-		if (percent > 100U) {
-			percent = 100U;
-		}
 		s_progress_fn(percent);
 	}
 }
@@ -276,13 +285,91 @@ static uint16_t rd_le16(const uint8_t *p)
 	return v;
 }
 
+static bool path_ends_with_ci(const char *path, const char *suffix)
+{
+	size_t n;
+	size_t s;
+	size_t i;
+
+	if (path == NULL || suffix == NULL) {
+		return false;
+	}
+	n = strlen(path);
+	s = strlen(suffix);
+	if (n < s) {
+		return false;
+	}
+	for (i = 0U; i < s; i++) {
+		unsigned char a = (unsigned char)path[n - s + i];
+		unsigned char b = (unsigned char)suffix[i];
+
+		if (a >= (unsigned char)'A' && a <= (unsigned char)'Z') {
+			a = (unsigned char)(a + 32U);
+		}
+		if (b >= (unsigned char)'A' && b <= (unsigned char)'Z') {
+			b = (unsigned char)(b + 32U);
+		}
+		if (a != b) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* FatFs uses direct disk_read when btr is a multiple of 512 at a sector boundary;
+ * this SD stack is flaky for that path on the first read. Stay under one sector. */
+#define INSTALL_SD_READ_SLICE  128U
+
+static bool install_read_bytes(FIL *fp, uint8_t *buf, UINT want, UINT *out_got)
+{
+	UINT got = 0U;
+	FRESULT fr = FR_OK;
+
+	while (got < want) {
+		UINT br = 0U;
+		UINT chunk = want - got;
+
+		if (chunk > INSTALL_SD_READ_SLICE) {
+			chunk = INSTALL_SD_READ_SLICE;
+		}
+		fr = f_read(fp, buf + got, chunk, &br);
+		if (fr != FR_OK || br == 0U) {
+			break;
+		}
+		got += br;
+	}
+	if (out_got != NULL) {
+		*out_got = got;
+	}
+	return (got >= 4U && fr == FR_OK);
+}
+
+static bool install_read_prefix(FIL *fp, uint32_t file_size, UINT *prefix_len_out)
+{
+	UINT want;
+	UINT got;
+
+	if (file_size == 0U) {
+		return false;
+	}
+	want = 512U;
+	if (file_size < want) {
+		want = (UINT)file_size;
+	}
+	if (!install_read_bytes(fp, s_install_io_buf, want, &got)) {
+		return false;
+	}
+	*prefix_len_out = got;
+	return true;
+}
+
 static bool flash_program_file_range(FIL *fp, uint32_t file_off, uint32_t flash_addr, uint32_t nbytes)
 {
 	uint32_t done = 0U;
 	uint32_t next_progress = INSTALL_PROGRESS_STEP;
 
-	if ((flash_addr < APP_FLASH_BASE) ||
-	    ((flash_addr + nbytes) > (APP_FLASH_BASE + APP_FLASH_SIZE))) {
+	if ((flash_addr < APP_FLASH_BASE) || (nbytes > APP_FLASH_SIZE) ||
+	    ((flash_addr - APP_FLASH_BASE) > (APP_FLASH_SIZE - nbytes))) {
 		printf("install: dest 0x%08lX+%lu outside app slot\r\n",
 		       (unsigned long)flash_addr, (unsigned long)nbytes);
 		return false;
@@ -342,47 +429,165 @@ static bool install_raw_bin(FIL *fp, uint32_t file_size)
 	return flash_program_file_range(fp, 0U, APP_FLASH_BASE, file_size);
 }
 
-static bool install_elf32(FIL *fp, uint32_t file_size)
+#define ELF_SEG_MAX  8U
+
+typedef struct {
+	uint32_t file_off;
+	uint32_t dest;
+	uint32_t len;
+} elf_seg_t;
+
+static elf_seg_t s_elf_segs[ELF_SEG_MAX];
+static uint8_t s_elf_nsegs;
+
+/* Prefer flash LMA (p_paddr). GNU ld .data is VMA=SRAM, LMA=flash. */
+static uint32_t elf_ph_load_addr(const uint8_t *ph)
 {
-	uint8_t eh[52];
-	UINT br;
-	uint32_t phoff;
-	uint16_t phentsize;
-	uint16_t phnum;
-	uint16_t i;
-	uint32_t programmed = 0U;
+	uint32_t p_vaddr = rd_le32(ph + 8);
+	uint32_t p_paddr = rd_le32(ph + 12);
 
-	if (file_size < 52U) {
-		printf("install: ELF too small\r\n");
+	if ((p_paddr >= APP_FLASH_BASE) &&
+	    (p_paddr < (APP_FLASH_BASE + APP_FLASH_SIZE))) {
+		return p_paddr;
+	}
+	if ((p_vaddr >= APP_FLASH_BASE) &&
+	    (p_vaddr < (APP_FLASH_BASE + APP_FLASH_SIZE))) {
+		return p_vaddr;
+	}
+	if (p_paddr != 0U) {
+		return p_paddr;
+	}
+	return p_vaddr;
+}
+
+static bool elf_addr_in_ram_or_ccm(uint32_t addr)
+{
+	if (addr >= 0x20000000U && addr < 0x20020000U) {
+		return true;
+	}
+	if (addr >= 0x10000000U && addr < 0x10010000U) {
+		return true;
+	}
+	return false;
+}
+
+/* True if this PT_LOAD belongs in the app flash slot (LMA/VMA in flash map). */
+static bool elf_ph_flash_dest(const uint8_t *ph, uint32_t *load_addr_out,
+                              uint32_t *filesz_out, bool log_skips)
+{
+	uint32_t p_type = rd_le32(ph + 0);
+	uint32_t p_filesz = rd_le32(ph + 16);
+	uint32_t load_addr;
+
+	if (p_type != 1U || p_filesz == 0U) {
 		return false;
 	}
 
-	if (f_lseek(fp, 0) != FR_OK ||
-	    f_read(fp, eh, sizeof(eh), &br) != FR_OK || br != sizeof(eh)) {
-		printf("install: ELF header read fail\r\n");
+	load_addr = elf_ph_load_addr(ph);
+	if (elf_addr_in_ram_or_ccm(load_addr)) {
+		if (log_skips) {
+			printf("install: skip RAM/CCM segment @ 0x%08lX (%lu B)\r\n",
+			       (unsigned long)load_addr, (unsigned long)p_filesz);
+		}
+		return false;
+	}
+	if (p_filesz > APP_FLASH_SIZE) {
+		if (log_skips) {
+			printf("install: skip segment (%lu B) larger than app slot\r\n",
+			       (unsigned long)p_filesz);
+		}
+		return false;
+	}
+	if (load_addr < APP_FLASH_BASE ||
+	    (load_addr - APP_FLASH_BASE) > (APP_FLASH_SIZE - p_filesz)) {
+		if (log_skips) {
+			printf("install: skip segment @ 0x%08lX (%lu B) outside app slot\r\n",
+			       (unsigned long)load_addr, (unsigned long)p_filesz);
+		}
 		return false;
 	}
 
+	*load_addr_out = load_addr;
+	*filesz_out = p_filesz;
+	return true;
+}
+
+static bool prefix_is_elf32_arm_exec(const uint8_t *eh, UINT n)
+{
+	uint16_t e_type;
+
+	if (n < 52U) {
+		return false;
+	}
 	if (eh[0] != 0x7FU || eh[1] != 'E' || eh[2] != 'L' || eh[3] != 'F') {
-		printf("install: not ELF\r\n");
 		return false;
 	}
 	if (eh[4] != 1U || eh[5] != 1U) {
 		printf("install: need ELF32 little-endian\r\n");
 		return false;
 	}
-	if (rd_le16(eh + 16) != 2U) {
-		printf("install: ELF not ET_EXEC\r\n");
+	e_type = rd_le16(eh + 16);
+	if (e_type != 2U && e_type != 3U) {
+		printf("install: ELF not executable (e_type=%u)\r\n", (unsigned)e_type);
 		return false;
 	}
 	if (rd_le16(eh + 18) != 40U) {
 		printf("install: ELF not EM_ARM\r\n");
 		return false;
 	}
+	return true;
+}
 
-	phoff = rd_le32(eh + 28);
-	phentsize = rd_le16(eh + 42);
-	phnum = rd_le16(eh + 44);
+static bool elf_add_flash_seg(const uint8_t *ph)
+{
+	uint32_t dest;
+	uint32_t filesz;
+	uint32_t poff;
+
+	if (!elf_ph_flash_dest(ph, &dest, &filesz, true)) {
+		return true;
+	}
+	if (s_elf_nsegs >= ELF_SEG_MAX) {
+		printf("install: too many FLASH PT_LOAD\r\n");
+		return false;
+	}
+	poff = rd_le32(ph + 4);
+	s_elf_segs[s_elf_nsegs].file_off = poff;
+	s_elf_segs[s_elf_nsegs].dest = dest;
+	s_elf_segs[s_elf_nsegs].len = filesz;
+	s_elf_nsegs++;
+	s_install_prog_total += filesz;
+	printf("install: FLASH PT_LOAD file+0x%lX -> 0x%08lX (%lu B)\r\n",
+	       (unsigned long)poff, (unsigned long)dest, (unsigned long)filesz);
+	return true;
+}
+
+static bool elf_collect_from_phdr_table(const uint8_t *tbl, uint16_t phnum,
+                                        uint16_t phentsize)
+{
+	uint16_t i;
+
+	s_elf_nsegs = 0U;
+	s_install_prog_total = 0U;
+
+	for (i = 0U; i < phnum; i++) {
+		if (!elf_add_flash_seg(tbl + ((uint32_t)i * phentsize))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool elf_collect_flash_segs(FIL *fp, const uint8_t *prefix, UINT prefix_len)
+{
+	uint32_t phoff = rd_le32(prefix + 28);
+	uint16_t phentsize = rd_le16(prefix + 42);
+	uint16_t phnum = rd_le16(prefix + 44);
+	uint32_t phbytes;
+	UINT br;
+
+	printf("install: ELF32 ARM phoff=%lu phentsize=%u phnum=%u\r\n",
+	       (unsigned long)phoff, (unsigned)phentsize, (unsigned)phnum);
 
 	if (phentsize < 32U || phnum == 0U || phnum > 32U) {
 		printf("install: bad ELF phdrs (%u x %u)\r\n",
@@ -390,124 +595,46 @@ static bool install_elf32(FIL *fp, uint32_t file_size)
 		return false;
 	}
 
-	printf("install: ELF32 ARM, %u load headers\r\n", (unsigned)phnum);
-
-	for (i = 0U; i < phnum; i++) {
-		uint8_t ph[32];
-		uint32_t p_type;
-		uint32_t p_offset;
-		uint32_t p_paddr;
-		uint32_t p_filesz;
-
-		if (f_lseek(fp, phoff + ((uint32_t)i * phentsize)) != FR_OK ||
-		    f_read(fp, ph, 32U, &br) != FR_OK || br != 32U) {
-			printf("install: phdr %u read fail\r\n", (unsigned)i);
-			return false;
-		}
-
-		p_type = rd_le32(ph + 0);
-		p_offset = rd_le32(ph + 4);
-		p_paddr = rd_le32(ph + 12);
-		p_filesz = rd_le32(ph + 16);
-
-		if (p_type != 1U || p_filesz == 0U) {
-			continue;
-		}
-
-		/* RAM / CCM — startup copies these; do not write SRAM as flash. */
-		if (p_paddr >= 0x20000000U || (p_paddr >= 0x10000000U && p_paddr < 0x10010000U)) {
-			printf("install: skip RAM segment @ 0x%08lX (%lu B)\r\n",
-			       (unsigned long)p_paddr, (unsigned long)p_filesz);
-			continue;
-		}
-
-		printf("install: FLASH PT_LOAD file+0x%lX -> 0x%08lX (%lu B)\r\n",
-		       (unsigned long)p_offset, (unsigned long)p_paddr,
-		       (unsigned long)p_filesz);
-
-		if (!flash_program_file_range(fp, p_offset, p_paddr, p_filesz)) {
-			return false;
-		}
-		programmed += p_filesz;
+	phbytes = (uint32_t)phnum * (uint32_t)phentsize;
+	if (phoff >= 52U && (phoff + phbytes) <= (uint32_t)prefix_len) {
+		return elf_collect_from_phdr_table(prefix + phoff, phnum, phentsize);
 	}
 
-	if (programmed == 0U) {
-		printf("install: no FLASH PT_LOAD in ELF\r\n");
+	if (phbytes > INSTALL_IO_CHUNK) {
+		printf("install: PHDR table too large (%lu)\r\n", (unsigned long)phbytes);
 		return false;
 	}
-	return true;
-}
 
-static uint32_t elf_flash_load_total(FIL *fp)
-{
-	uint8_t eh[52];
-	UINT br;
-	uint32_t phoff;
-	uint16_t phentsize;
-	uint16_t phnum;
-	uint16_t i;
-	uint32_t total = 0U;
-
-	if (f_lseek(fp, 0) != FR_OK ||
-	    f_read(fp, eh, sizeof(eh), &br) != FR_OK || br != sizeof(eh)) {
-		return 0U;
-	}
-	if (eh[0] != 0x7FU || eh[1] != 'E' || eh[2] != 'L' || eh[3] != 'F') {
-		return 0U;
-	}
-	if (eh[4] != 1U || eh[5] != 1U || rd_le16(eh + 18) != 40U) {
-		return 0U;
-	}
-
-	phoff = rd_le32(eh + 28);
-	phentsize = rd_le16(eh + 42);
-	phnum = rd_le16(eh + 44);
-	if (phentsize < 32U || phnum == 0U || phnum > 32U) {
-		return 0U;
-	}
-
-	for (i = 0U; i < phnum; i++) {
-		uint8_t ph[32];
-		uint32_t p_type;
-		uint32_t p_paddr;
-		uint32_t p_filesz;
-
-		if (f_lseek(fp, phoff + ((uint32_t)i * phentsize)) != FR_OK ||
-		    f_read(fp, ph, 32U, &br) != FR_OK || br != 32U) {
-			return 0U;
-		}
-		p_type = rd_le32(ph + 0);
-		p_paddr = rd_le32(ph + 12);
-		p_filesz = rd_le32(ph + 16);
-		if (p_type != 1U || p_filesz == 0U) {
-			continue;
-		}
-		if (p_paddr >= 0x20000000U ||
-		    (p_paddr >= 0x10000000U && p_paddr < 0x10010000U)) {
-			continue;
-		}
-		total += p_filesz;
-	}
-	return total;
-}
-
-static bool file_is_elf(FIL *fp)
-{
-	uint8_t mag[4];
-	UINT br;
-
-	if (f_lseek(fp, 0) != FR_OK ||
-	    f_read(fp, mag, 4U, &br) != FR_OK || br != 4U) {
+	printf("install: reading PHDRs from file+%lu (%lu B)\r\n",
+	       (unsigned long)phoff, (unsigned long)phbytes);
+	if (f_lseek(fp, phoff) != FR_OK ||
+	    f_read(fp, s_install_io_buf, (UINT)phbytes, &br) != FR_OK ||
+	    br != (UINT)phbytes) {
+		printf("install: PHDR table read fail\r\n");
 		return false;
 	}
-	return mag[0] == 0x7FU && mag[1] == 'E' && mag[2] == 'L' && mag[3] == 'F';
+	return elf_collect_from_phdr_table(s_install_io_buf, phnum, phentsize);
+}
+
+static bool install_elf_cached(FIL *fp)
+{
+	uint8_t i;
+
+	for (i = 0U; i < s_elf_nsegs; i++) {
+		if (!flash_program_file_range(fp, s_elf_segs[i].file_off,
+		                              s_elf_segs[i].dest, s_elf_segs[i].len)) {
+			return false;
+		}
+	}
+	return s_elf_nsegs > 0U;
 }
 
 bool boot_app_install_from_file(const char *fat_path)
 {
-	FIL fp;
+	FIL *fp = &s_install_fp;
 	FRESULT fr;
 	uint32_t file_size;
+	UINT prefix_len;
 	bool ok;
 	bool elf;
 
@@ -515,29 +642,64 @@ bool boot_app_install_from_file(const char *fat_path)
 		return false;
 	}
 
-	fr = f_open(&fp, fat_path, FA_READ);
+	fr = f_open(fp, fat_path, FA_READ);
 	if (fr != FR_OK) {
 		printf("install: open %s failed (%d)\r\n", fat_path, (int)fr);
 		return false;
 	}
 
-	file_size = (uint32_t)f_size(&fp);
-	elf = file_is_elf(&fp);
+	file_size = (uint32_t)f_size(fp);
+	if (file_size == 0U) {
+		printf("install: empty file\r\n");
+		(void)f_close(fp);
+		return false;
+	}
+
+	/* Only .elf needs a header parse. .bin goes straight to sequential
+	 * programming (the path that already worked on this SD stack). */
+	if (!path_ends_with_ci(fat_path, ".elf")) {
+		elf = false;
+		prefix_len = 0U;
+	} else if (!install_read_prefix(fp, file_size, &prefix_len)) {
+		printf("install: prefix read fail (size=%lu)\r\n",
+		       (unsigned long)file_size);
+		(void)f_close(fp);
+		return false;
+	} else {
+		elf = (prefix_len >= 4U &&
+		       s_install_io_buf[0] == 0x7FU &&
+		       s_install_io_buf[1] == 'E' &&
+		       s_install_io_buf[2] == 'L' &&
+		       s_install_io_buf[3] == 'F');
+		if (!elf) {
+			printf("install: %s named .elf but not ELF magic — treating as BIN\r\n",
+			       fat_path);
+			(void)f_lseek(fp, 0);
+		}
+	}
 
 	printf("install: %s (%lu bytes, %s)\r\n",
 	       fat_path, (unsigned long)file_size, elf ? "ELF" : "BIN");
 
+	lcd_bl_force_cpu_pixels(true);
 	s_install_prog_done = 0U;
+	s_progress_pct_last = 0xFFU;
+	s_elf_nsegs = 0U;
 	if (elf) {
-		s_install_prog_total = elf_flash_load_total(&fp);
-		if (s_install_prog_total == 0U) {
-			(void)f_close(&fp);
+		if (!prefix_is_elf32_arm_exec(s_install_io_buf, prefix_len) ||
+		    !elf_collect_flash_segs(fp, s_install_io_buf, prefix_len) ||
+		    s_elf_nsegs == 0U) {
+			printf("install: no flash PT_LOAD for app slot (check APP.ld @ 0x%08lX)\r\n",
+			       (unsigned long)APP_FLASH_BASE);
+			lcd_bl_force_cpu_pixels(false);
+			(void)f_close(fp);
 			return false;
 		}
+		printf("install: flash payload %lu bytes in %u segment(s)\r\n",
+		       (unsigned long)s_install_prog_total, (unsigned)s_elf_nsegs);
 	} else {
 		s_install_prog_total = file_size;
 	}
-	install_progress_report(0U);
 
 	printf("install: erasing app slot...\r\n");
 	HAL_FLASH_Unlock();
@@ -546,15 +708,17 @@ bool boot_app_install_from_file(const char *fat_path)
 
 	if (!flash_erase_app_slot()) {
 		HAL_FLASH_Lock();
-		(void)f_close(&fp);
+		lcd_bl_force_cpu_pixels(false);
+		(void)f_close(fp);
 		return false;
 	}
 	install_progress_report(INSTALL_PCT_ERASE);
 
-	ok = elf ? install_elf32(&fp, file_size) : install_raw_bin(&fp, file_size);
+	ok = elf ? install_elf_cached(fp) : install_raw_bin(fp, file_size);
 
 	HAL_FLASH_Lock();
-	(void)f_close(&fp);
+	(void)f_close(fp);
+	lcd_bl_force_cpu_pixels(false);
 
 	if (!ok) {
 		return false;
