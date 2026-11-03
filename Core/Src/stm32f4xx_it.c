@@ -22,6 +22,7 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "lcd_bl.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -199,5 +200,15 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /* USER CODE BEGIN 1 */
+
+void DMA1_Stream4_IRQHandler(void)
+{
+	lcd_bl_dma_irq_handler();
+}
+
+void SPI2_IRQHandler(void)
+{
+	lcd_bl_spi_irq_handler();
+}
 
 /* USER CODE END 1 */

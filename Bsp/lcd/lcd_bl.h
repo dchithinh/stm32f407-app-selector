@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 void lcd_bl_init(void);
+void lcd_bl_dma_irq_handler(void);
+void lcd_bl_spi_irq_handler(void);
 
 void lcd_bl_fill_screen(uint16_t color);
 void lcd_bl_fill_rect(int x, int y, int w, int h, uint16_t color);

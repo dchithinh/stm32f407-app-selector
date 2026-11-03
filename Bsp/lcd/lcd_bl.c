@@ -3,9 +3,16 @@
 #include "ili9341_regs.h"
 #include "font8x16.h"
 #include "main.h"
+#include "stm32f4xx_hal_dma.h"
 #include <string.h>
 
+#define LCD_USE_SPI_DMA  1
+
 SPI_HandleTypeDef hspi2;
+
+#if LCD_USE_SPI_DMA
+DMA_HandleTypeDef hdma_spi2_tx;
+#endif
 
 static SPI_TypeDef *const lcd_spi = LCD_SPI;
 
@@ -22,8 +29,30 @@ static void spi_wait_tx(void)
 	}
 }
 
+static void lcd_spi_set_8bit(void)
+{
+	spi_wait_tx();
+	__HAL_SPI_DISABLE(&hspi2);
+	lcd_spi->CR1 &= (uint16_t)~SPI_CR1_DFF;
+	hspi2.Init.DataSize = SPI_DATASIZE_8BIT;
+	__HAL_SPI_ENABLE(&hspi2);
+}
+
+static void lcd_spi_set_16bit(void)
+{
+	spi_wait_tx();
+	__HAL_SPI_DISABLE(&hspi2);
+	lcd_spi->CR1 |= SPI_CR1_DFF;
+	hspi2.Init.DataSize = SPI_DATASIZE_16BIT;
+	__HAL_SPI_ENABLE(&hspi2);
+}
+
 static void spi_write8(uint8_t b)
 {
+#if LCD_USE_SPI_DMA
+	while (hspi2.State != HAL_SPI_STATE_READY) {
+	}
+#endif
 	while (!(lcd_spi->SR & SPI_SR_TXE)) {
 	}
 	lcd_spi->DR = b;
@@ -99,6 +128,118 @@ static void lcd_spi_init(void)
 		Error_Handler();
 	}
 	__HAL_SPI_ENABLE(&hspi2);
+}
+
+#if LCD_USE_SPI_DMA
+static void lcd_dma_init(void)
+{
+	/* HAL_DMA_Init() does not call MspInit — enable the clock here. */
+	__HAL_RCC_DMA1_CLK_ENABLE();
+
+	hdma_spi2_tx.Instance = DMA1_Stream4;
+	hdma_spi2_tx.Init.Channel = DMA_CHANNEL_0;
+	hdma_spi2_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
+	hdma_spi2_tx.Init.PeriphInc = DMA_PINC_DISABLE;
+	hdma_spi2_tx.Init.MemInc = DMA_MINC_ENABLE;
+	hdma_spi2_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
+	hdma_spi2_tx.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
+	hdma_spi2_tx.Init.Mode = DMA_NORMAL;
+	hdma_spi2_tx.Init.Priority = DMA_PRIORITY_HIGH;
+	hdma_spi2_tx.Init.FIFOMode = DMA_FIFOMODE_DISABLE;
+
+	if (HAL_DMA_Init(&hdma_spi2_tx) != HAL_OK) {
+		Error_Handler();
+	}
+	__HAL_LINKDMA(&hspi2, hdmatx, hdma_spi2_tx);
+
+	/* NVIC group 0: only subpriority is valid; preempt must be 0. */
+	HAL_NVIC_SetPriority(DMA1_Stream4_IRQn, 0, 0);
+	HAL_NVIC_EnableIRQ(DMA1_Stream4_IRQn);
+	HAL_NVIC_SetPriority(SPI2_IRQn, 0, 0);
+	HAL_NVIC_EnableIRQ(SPI2_IRQn);
+}
+
+void lcd_bl_dma_irq_handler(void)
+{
+	HAL_DMA_IRQHandler(&hdma_spi2_tx);
+}
+
+void lcd_bl_spi_irq_handler(void)
+{
+	HAL_SPI_IRQHandler(&hspi2);
+}
+
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+	(void)hspi;
+}
+
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)
+{
+	if (hspi->Instance != LCD_SPI) {
+		return;
+	}
+	if (hspi->hdmatx != NULL) {
+		(void)HAL_DMA_Abort(hspi->hdmatx);
+	}
+	(void)HAL_SPI_Abort(hspi);
+	lcd_spi_set_8bit();
+}
+#else
+void lcd_bl_dma_irq_handler(void)
+{
+}
+
+void lcd_bl_spi_irq_handler(void)
+{
+}
+#endif /* LCD_USE_SPI_DMA */
+
+static void lcd_spi_write16_cpu(const uint16_t *pixels, uint32_t count)
+{
+	uint32_t i;
+
+	for (i = 0; i < count; i++) {
+		while (!(lcd_spi->SR & SPI_SR_TXE)) {
+		}
+		lcd_spi->DR = pixels[i];
+	}
+	spi_wait_tx();
+}
+
+static void lcd_bl_write_pixels(const uint16_t *pixels, uint32_t count)
+{
+	static uint16_t wire[LCD_WIDTH];
+	uint32_t i;
+
+	if (count == 0U) {
+		return;
+	}
+	if (count > LCD_WIDTH) {
+		count = LCD_WIDTH;
+	}
+	for (i = 0; i < count; i++) {
+		wire[i] = pixels[count - 1U - i];
+	}
+
+	lcd_spi_set_16bit();
+	CS_L();
+	DC_DAT();
+	__HAL_SPI_CLEAR_OVRFLAG(&hspi2);
+
+#if LCD_USE_SPI_DMA
+	if (HAL_SPI_Transmit_DMA(&hspi2, (uint8_t *)wire, (uint16_t)count) == HAL_OK) {
+		while (hspi2.State != HAL_SPI_STATE_READY) {
+		}
+	} else {
+		lcd_spi_write16_cpu(wire, count);
+	}
+#else
+	lcd_spi_write16_cpu(wire, count);
+#endif
+	spi_wait_tx();
+	CS_H();
+	lcd_spi_set_8bit();
 }
 
 static void lcd_reset(void)
@@ -218,37 +359,23 @@ void lcd_bl_init(void)
 {
 	lcd_pin_init();
 	lcd_spi_init();
+#if LCD_USE_SPI_DMA
+	lcd_dma_init();
+#endif
 	lcd_reset();
 	lcd_panel_config();
-}
-
-static void spi_write_rgb565(uint16_t color)
-{
-	/* ILI9341 expects high byte first on the wire (see Pomodoro color bars). */
-	spi_write8((uint8_t)(color >> 8));
-	spi_write8((uint8_t)(color & 0xFFU));
-}
-
-static void lcd_bl_write_pixels(const uint16_t *pixels, uint32_t count)
-{
-	/* With MADCTL MX|MY, GRAM writes run opposite to our logical LTR order. */
-	CS_L();
-	DC_DAT();
-	for (uint32_t i = count; i > 0U; i--) {
-		spi_write_rgb565(pixels[i - 1U]);
-	}
-	CS_H();
 }
 
 void lcd_bl_fill_screen(uint16_t color)
 {
 	static uint16_t line[LCD_WIDTH];
 	uint32_t x;
+	uint32_t y;
 
 	for (x = 0; x < LCD_WIDTH; x++) {
 		line[x] = color;
 	}
-	for (uint32_t y = 0; y < LCD_HEIGHT; y++) {
+	for (y = 0; y < LCD_HEIGHT; y++) {
 		lcd_set_window(0, (uint16_t)y, LCD_WIDTH - 1U, (uint16_t)y);
 		lcd_bl_write_pixels(line, LCD_WIDTH);
 	}
@@ -259,7 +386,6 @@ void lcd_bl_fill_rect(int x, int y, int w, int h, uint16_t color)
 	static uint16_t line[LCD_WIDTH];
 	int row;
 	int col;
-	uint32_t run;
 
 	if (w <= 0 || h <= 0) {
 		return;
@@ -285,12 +411,10 @@ void lcd_bl_fill_rect(int x, int y, int w, int h, uint16_t color)
 	for (col = 0; col < w; col++) {
 		line[(uint32_t)col] = color;
 	}
-
 	for (row = y; row < y + h; row++) {
 		lcd_set_window((uint16_t)x, (uint16_t)row,
 		               (uint16_t)(x + w - 1), (uint16_t)row);
-		run = (uint32_t)w;
-		lcd_bl_write_pixels(line, run);
+		lcd_bl_write_pixels(line, (uint32_t)w);
 	}
 }
 
