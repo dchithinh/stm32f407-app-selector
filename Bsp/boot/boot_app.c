@@ -13,14 +13,13 @@
 
 /* SD/FatFs: larger reads amortize SPI overhead; keep multiple of 512. */
 #define INSTALL_IO_CHUNK          4096U
-#define INSTALL_PROGRESS_STEP     (32U * 1024U)
+#define INSTALL_PROGRESS_STEP     INSTALL_IO_CHUNK
 
 static uint8_t s_install_io_buf[INSTALL_IO_CHUNK] __attribute__((aligned(8)));
 
 /* FIL is ~600 bytes; keep off the 2 KiB bootloader stack. */
 static FIL s_install_fp;
 
-#define APP_RESET_MAX_OFFSET      (48U * 1024U)
 #define INSTALL_PCT_ERASE         5U
 #define INSTALL_PCT_PROGRAM       95U
 
@@ -71,14 +70,9 @@ static bool thumb_reset_in_app_region(uint32_t addr)
 	       (addr < (APP_FLASH_BASE + APP_FLASH_SIZE));
 }
 
-static bool reset_vector_plausible(uint32_t reset)
+static bool reset_vector_in_app_flash(uint32_t reset)
 {
-	uint32_t entry = reset & ~1U;
-
-	if (!thumb_reset_in_app_region(reset)) {
-		return false;
-	}
-	return (entry - APP_FLASH_BASE) < APP_RESET_MAX_OFFSET;
+	return thumb_reset_in_app_region(reset);
 }
 
 static bool stack_pointer_in_sram(uint32_t sp)
@@ -98,7 +92,7 @@ bool boot_app_is_valid(void)
 	if (!stack_pointer_in_sram(sp)) {
 		return false;
 	}
-	if (!reset_vector_plausible(reset)) {
+	if (!reset_vector_in_app_flash(reset)) {
 		return false;
 	}
 	return true;
@@ -119,12 +113,15 @@ void boot_app_log_status(void)
 	       (unsigned long)reset,
 	       (unsigned long)entry,
 	       (unsigned long)(reset & 1U),
-	       reset_vector_plausible(reset) ? "OK" :
-		       "BAD (check APP.ld @ 0x08010000; reset must be near app base)");
+	       reset_vector_in_app_flash(reset) ? "OK" :
+		       "BAD (thumb reset must point into app flash 0x08010000..0x080FFFFF)");
 	if (entry < APP_FLASH_BASE) {
 		printf("  hint: entry below app base — app may be linked with\r\n");
 		printf("        STM32F407VGTX_BL.ld (0x08000000) not APP.ld (0x%08lX)\r\n",
 		       (unsigned long)APP_FLASH_BASE);
+	} else {
+		printf("  first word @ entry: 0x%08lX\r\n",
+		       (unsigned long)(*(volatile uint32_t *)entry));
 	}
 	if (sp == 0xFFFFFFFFU && reset == 0xFFFFFFFFU) {
 		printf("  hint: flash looks erased — program stm32f407xx_pomodoro.elf\r\n");
@@ -136,21 +133,24 @@ static void boot_teardown(void)
 {
 	uint32_t i;
 
+	/* SD/FatFs and HAL timeouts need SysTick. Do this before killing the tick. */
+	sd_apps_unmount();
+	sd_spi_cs_release_all();
+
+	/* App SystemClock_Config expects reset-like clocks (HSI), not the BL PLL. */
+	(void)HAL_RCC_DeInit();
+
 	__disable_irq();
 
 	SysTick->CTRL = 0U;
 	SysTick->LOAD = 0U;
 	SysTick->VAL = 0U;
+	SCB->ICSR = SCB_ICSR_PENDSVCLR_Msk | SCB_ICSR_PENDSTCLR_Msk;
 
 	for (i = 0U; i < 8U; i++) {
 		NVIC->ICER[i] = 0xFFFFFFFFU;
 		NVIC->ICPR[i] = 0xFFFFFFFFU;
 	}
-
-	SCB->ICSR = SCB_ICSR_PENDSVCLR_Msk | SCB_ICSR_PENDSTCLR_Msk;
-
-	sd_apps_unmount();
-	sd_spi_cs_release_all();
 
 	/* Release bus/peripherals the bootloader used so the app HAL can own them. */
 	__HAL_RCC_SPI2_FORCE_RESET();
@@ -166,27 +166,28 @@ static void boot_teardown(void)
 	 * interface, which can hang the core before the app's SystemInit runs. */
 }
 
-typedef void (*app_entry_fn)(void);
-
 static void boot_jump_with_msp(uint32_t sp, uint32_t entry)
 {
-	app_entry_fn go;
-
-	__set_MSP(sp);
-	SCB->VTOR = APP_VECTOR_TABLE;
+	__disable_irq();
 	__set_CONTROL(0U);
 
 #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
 	SCB->CPACR |= ((3UL << (10U * 2U)) | (3UL << (11U * 2U)));
 #endif
 
+	SCB->VTOR = APP_VECTOR_TABLE;
 	__DSB();
 	__ISB();
 
-	__disable_irq();
+	/* Do not set MSP in C then keep executing: locals can live on the old
+	 * stack. Switch SP and branch in one asm sequence. */
+	__asm volatile(
+		"msr msp, %0\n"
+		"bx  %1\n"
+		:
+		: "r"(sp), "r"(entry)
+		: "memory");
 
-	go = (app_entry_fn)entry;
-	go();
 	__builtin_unreachable();
 }
 
@@ -341,7 +342,7 @@ static bool install_read_bytes(FIL *fp, uint8_t *buf, UINT want, UINT *out_got)
 	if (out_got != NULL) {
 		*out_got = got;
 	}
-	return (got >= 4U && fr == FR_OK);
+	return (got == want && fr == FR_OK);
 }
 
 static bool install_read_prefix(FIL *fp, uint32_t file_size, UINT *prefix_len_out)
@@ -380,16 +381,21 @@ static bool flash_program_file_range(FIL *fp, uint32_t file_off, uint32_t flash_
 		return false;
 	}
 
+	printf("install: programming %lu bytes\r\n", (unsigned long)nbytes);
+
 	while (done < nbytes) {
 		UINT to_read = (UINT)INSTALL_IO_CHUNK;
-		UINT br;
+		UINT br = 0U;
+		FRESULT fr;
 
 		if ((nbytes - done) < to_read) {
 			to_read = (UINT)(nbytes - done);
 		}
 
-		if (f_read(fp, s_install_io_buf, to_read, &br) != FR_OK || br == 0U) {
-			printf("install: read fail @ file+%lu\r\n", (unsigned long)(file_off + done));
+		fr = f_read(fp, s_install_io_buf, to_read, &br);
+		if (fr != FR_OK || br == 0U) {
+			printf("install: read fail @ file+%lu (fr=%d br=%u)\r\n",
+			       (unsigned long)(file_off + done), (int)fr, (unsigned)br);
 			return false;
 		}
 
@@ -712,6 +718,8 @@ bool boot_app_install_from_file(const char *fat_path)
 		(void)f_close(fp);
 		return false;
 	}
+	/* Flash erase can take seconds; dummy clocks so the SD SPI slave is ready. */
+	sd_spi_bus_idle_clocks(16U);
 	install_progress_report(INSTALL_PCT_ERASE);
 
 	ok = elf ? install_elf_cached(fp) : install_raw_bin(fp, file_size);
