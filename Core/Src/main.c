@@ -21,10 +21,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "bl_sm.h"
 #include "debug_uart.h"
 #include "boot_policy.h"
-#include "boot_app.h"
-#include "boot_loader.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -102,26 +101,7 @@ int main(void)
          (unsigned long)HAL_RCC_GetPCLK1Freq(),
          (unsigned long)HAL_RCC_GetPCLK2Freq());
 
-  boot_app_log_status();
-  boot_policy_log();
-
-  if (boot_should_enter_loader()) {
-    printf("Staying in bootloader.\r\n");
-    boot_loader_run();
-  }
-
-#if BOOT_FORCE_LOADER
-  printf("BOOT_FORCE_LOADER=1 — staying in bootloader.\r\n");
-  boot_loader_run();
-#endif
-
-  if (boot_app_is_valid() && boot_policy_confirm_autoboot()) {
-    printf("Autoboot to app...\r\n");
-    boot_jump_to_app();
-  }
-
-  printf("Staying in bootloader.\r\n");
-  boot_loader_run();
+  bl_sm_run();
   /* USER CODE END 2 */
 
   /* Infinite loop */

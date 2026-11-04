@@ -53,6 +53,7 @@
 									<listOptionValue builtIn="false" value="../Bsp/sdcard"/>
 									<listOptionValue builtIn="false" value="../Bsp/lcd"/>
 									<listOptionValue builtIn="false" value="../Bsp/touch"/>
+									<listOptionValue builtIn="false" value="../Bsp/sm"/>
 									<listOptionValue builtIn="false" value="../Bsp/ui"/>
 									<listOptionValue builtIn="false" value="../Middlewares/Third_Party/FatFs"/>
 								</option>
@@ -138,6 +139,7 @@
 									<listOptionValue builtIn="false" value="../Bsp/sdcard"/>
 									<listOptionValue builtIn="false" value="../Bsp/lcd"/>
 									<listOptionValue builtIn="false" value="../Bsp/touch"/>
+									<listOptionValue builtIn="false" value="../Bsp/sm"/>
 									<listOptionValue builtIn="false" value="../Bsp/ui"/>
 									<listOptionValue builtIn="false" value="../Middlewares/Third_Party/FatFs"/>
 								</option>

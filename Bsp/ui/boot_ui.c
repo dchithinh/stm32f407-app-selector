@@ -1,4 +1,4 @@
-#include "boot_ui.h"
+﻿#include "boot_ui.h"
 #include "boot_app.h"
 #include "boot_loader.h"
 #include "boot_policy.h"
@@ -9,6 +9,8 @@
 #include "sd_spi.h"
 #include "touch_bl.h"
 #include "main.h"
+#include "bl_sm_ui.h"
+#include "bl_sm_types.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -93,8 +95,11 @@ static char g_msg[64];
 static char g_title[32];
 static char g_install_name[36];
 static bool g_touch_down;
+static bool g_touch_anchor;
 static int16_t g_last_x;
 static int16_t g_last_y;
+static int16_t g_down_x;
+static int16_t g_down_y;
 static uint32_t g_ignore_touch_until;
 static ui_list_btn_t g_list_btn_pressed;
 static bool g_msg_btn_pressed;
@@ -702,6 +707,55 @@ static void ui_do_reboot(void)
 	boot_mcu_reboot();
 }
 
+static bl_sm_ui_poll_t ui_handle_list_tap_sm(int16_t x, int16_t y)
+{
+	int i;
+
+	if (ui_hit_reboot_btn(x, y)) {
+		return BL_UI_POLL_REBOOT_BTN;
+	}
+
+	if (ui_install_enabled() && ui_hit_install_btn(x, y)) {
+		return BL_UI_POLL_CONFIRM_INSTALL;
+	}
+
+	if (g_apps.count > UI_VISIBLE_ROWS) {
+		if (point_in_rect(x, y, UI_SCROLL_X, UI_ROW_Y0 + 4, 64, UI_ROW_H * 2)) {
+			if (g_scroll > 0) {
+				g_scroll--;
+				ui_draw_list();
+			}
+			return BL_UI_POLL_NONE;
+		}
+		if (point_in_rect(x, y, UI_SCROLL_X, UI_ROW_Y0 + UI_ROW_H * 2, 64, UI_ROW_H * 2)) {
+			if (g_scroll + (int)UI_VISIBLE_ROWS < (int)g_apps.count) {
+				g_scroll++;
+				ui_draw_list();
+			}
+			return BL_UI_POLL_NONE;
+		}
+	}
+
+	for (i = 0; i < (int)UI_VISIBLE_ROWS; i++) {
+		int idx = g_scroll + i;
+		int ry = UI_ROW_Y0 + i * UI_ROW_H;
+		int row_w = (g_apps.count > UI_VISIBLE_ROWS) ? (UI_SCROLL_X - 8) : (LCD_WIDTH - 8);
+
+		if (idx >= (int)g_apps.count) {
+			break;
+		}
+		if (point_in_rect(x, y, 4, ry, row_w, UI_ROW_H - 4)) {
+			ui_set_selected(idx);
+			printf("UI: selected %s (%d,%d)\r\n",
+			       g_apps.items[g_selected].name, (int)x, (int)y);
+			return BL_UI_POLL_SELECT_APP;
+		}
+	}
+
+	printf("UI: tap (%d,%d) no hit\r\n", (int)x, (int)y);
+	return BL_UI_POLL_NONE;
+}
+
 static void ui_handle_list_tap(int16_t x, int16_t y)
 {
 	int i;
@@ -709,36 +763,6 @@ static void ui_handle_list_tap(int16_t x, int16_t y)
 	if (ui_hit_reboot_btn(x, y)) {
 		ui_do_reboot();
 		return;
-	}
-
-	if (point_in_rect(x, y, UI_SCROLL_X, UI_ROW_Y0 + 4, 64, UI_ROW_H * 2)) {
-		if (g_scroll > 0) {
-			g_scroll--;
-			ui_draw_list();
-		}
-		return;
-	}
-	if (point_in_rect(x, y, UI_SCROLL_X, UI_ROW_Y0 + UI_ROW_H * 2, 64, UI_ROW_H * 2)) {
-		if (g_scroll + (int)UI_VISIBLE_ROWS < (int)g_apps.count) {
-			g_scroll++;
-			ui_draw_list();
-		}
-		return;
-	}
-
-	for (i = 0; i < (int)UI_VISIBLE_ROWS; i++) {
-		int idx = g_scroll + i;
-		int ry = UI_ROW_Y0 + i * UI_ROW_H;
-
-		if (idx >= (int)g_apps.count) {
-			break;
-		}
-		if (point_in_rect(x, y, 4, ry, LCD_WIDTH - 8, UI_ROW_H - 4)) {
-			ui_set_selected(idx);
-			printf("UI: selected %s (%d,%d)\r\n",
-			       g_apps.items[g_selected].name, (int)x, (int)y);
-			return;
-		}
 	}
 
 	if (ui_install_enabled() && ui_hit_install_btn(x, y)) {
@@ -762,6 +786,39 @@ static void ui_handle_list_tap(int16_t x, int16_t y)
 		g_screen = UI_SCREEN_MSG;
 		ui_draw_message(g_title, g_msg);
 		return;
+	}
+
+	if (g_apps.count > UI_VISIBLE_ROWS) {
+		if (point_in_rect(x, y, UI_SCROLL_X, UI_ROW_Y0 + 4, 64, UI_ROW_H * 2)) {
+			if (g_scroll > 0) {
+				g_scroll--;
+				ui_draw_list();
+			}
+			return;
+		}
+		if (point_in_rect(x, y, UI_SCROLL_X, UI_ROW_Y0 + UI_ROW_H * 2, 64, UI_ROW_H * 2)) {
+			if (g_scroll + (int)UI_VISIBLE_ROWS < (int)g_apps.count) {
+				g_scroll++;
+				ui_draw_list();
+			}
+			return;
+		}
+	}
+
+	for (i = 0; i < (int)UI_VISIBLE_ROWS; i++) {
+		int idx = g_scroll + i;
+		int ry = UI_ROW_Y0 + i * UI_ROW_H;
+		int row_w = (g_apps.count > UI_VISIBLE_ROWS) ? (UI_SCROLL_X - 8) : (LCD_WIDTH - 8);
+
+		if (idx >= (int)g_apps.count) {
+			break;
+		}
+		if (point_in_rect(x, y, 4, ry, row_w, UI_ROW_H - 4)) {
+			ui_set_selected(idx);
+			printf("UI: selected %s (%d,%d)\r\n",
+			       g_apps.items[g_selected].name, (int)x, (int)y);
+			return;
+		}
 	}
 
 	printf("UI: tap (%d,%d) no hit\r\n", (int)x, (int)y);
@@ -859,4 +916,256 @@ void boot_ui_run(void)
 		ui_poll_touch();
 		HAL_Delay(10);
 	}
+}
+
+/* --- State machine adapter (same UI behavior as above) --- */
+
+static bool s_sm_grace_touch_down;
+static int16_t s_sm_grace_last_x;
+static int16_t s_sm_grace_last_y;
+static bool s_sm_grace_btn_pressed;
+
+void bl_sm_ui_display_init(void)
+{
+	boot_ui_display_init();
+}
+
+void bl_sm_ui_grace_enter(bl_sm_ctx_t *ctx)
+{
+	if (ctx == NULL) {
+		return;
+	}
+	ctx->grace_sec_remaining = BOOT_AUTOBOOT_GRACE_MS / 1000U;
+	ctx->grace_second_deadline_ms = HAL_GetTick() + 1000U;
+	ctx->grace_counting = true;
+	s_sm_grace_touch_down = false;
+	s_sm_grace_btn_pressed = false;
+	ui_draw_autoboot_frame();
+	ui_update_autoboot_line(ctx->grace_sec_remaining);
+}
+
+void bl_sm_ui_grace_tick(bl_sm_ctx_t *ctx)
+{
+	if (ctx == NULL) {
+		return;
+	}
+	ui_update_autoboot_line(ctx->grace_sec_remaining);
+}
+
+void bl_sm_ui_grace_hide(void)
+{
+}
+
+bool bl_sm_ui_grace_poll_stay(void)
+{
+	return ui_autoboot_poll_cancel(&s_sm_grace_touch_down, &s_sm_grace_last_x,
+	                               &s_sm_grace_last_y, &s_sm_grace_btn_pressed);
+}
+
+void bl_sm_ui_loader_shell_enter(void)
+{
+	g_selected = -1;
+	g_scroll = 0;
+}
+
+void bl_sm_ui_catalog_scan(bl_sm_ctx_t *ctx)
+{
+	if (ctx == NULL) {
+		return;
+	}
+	ctx->catalog_ready = false;
+	ctx->catalog_unavailable = false;
+
+	if (!sd_apps_mount()) {
+		ctx->catalog_unavailable = true;
+		strncpy(g_title, "SD error", sizeof(g_title) - 1U);
+		strncpy(g_msg, "Mount failed", sizeof(g_msg) - 1U);
+		g_title[sizeof(g_title) - 1U] = '\0';
+		g_msg[sizeof(g_msg) - 1U] = '\0';
+		return;
+	}
+	if (!sd_apps_scan(&g_apps)) {
+		ctx->catalog_unavailable = true;
+		strncpy(g_title, "Application Lists", sizeof(g_title) - 1U);
+		strncpy(g_msg, g_apps.error, sizeof(g_msg) - 1U);
+		g_title[sizeof(g_title) - 1U] = '\0';
+		g_msg[sizeof(g_msg) - 1U] = '\0';
+		return;
+	}
+	ctx->catalog_ready = true;
+	printf("UI: %u app(s) on SD\r\n", (unsigned)g_apps.count);
+}
+
+void bl_sm_ui_show_browse(void)
+{
+	g_screen = UI_SCREEN_LIST;
+	g_touch_down = false;
+	g_touch_anchor = false;
+	g_list_btn_pressed = UI_LIST_BTN_NONE;
+	ui_draw_list();
+	g_ignore_touch_until = HAL_GetTick() + 250U;
+}
+
+void bl_sm_ui_apply_selection(int selected_index)
+{
+	ui_set_selected(selected_index);
+}
+
+void bl_sm_ui_redraw_browse(void)
+{
+	ui_draw_list();
+}
+
+void bl_sm_ui_rescan(bl_sm_ctx_t *ctx)
+{
+	if (ctx == NULL) {
+		return;
+	}
+	(void)sd_apps_scan(&g_apps);
+	g_selected = -1;
+	ctx->selected_index = -1;
+	g_scroll = 0;
+	ctx->catalog_ready = true;
+	ctx->catalog_unavailable = false;
+	g_screen = UI_SCREEN_LIST;
+	if (g_apps.count > 0U) {
+		ui_draw_list();
+		g_ignore_touch_until = HAL_GetTick() + 250U;
+	}
+}
+
+void bl_sm_ui_show_inform(bool install_failed)
+{
+	if (install_failed) {
+		snprintf(g_msg, sizeof(g_msg), "Install failed");
+		strncpy(g_title, "Error", sizeof(g_title) - 1U);
+		g_title[sizeof(g_title) - 1U] = '\0';
+	}
+	g_screen = UI_SCREEN_MSG;
+	ui_draw_message(g_title, g_msg);
+}
+
+const char *bl_sm_ui_selected_path(void)
+{
+	if (g_selected < 0 || g_selected >= (int)g_apps.count) {
+		return NULL;
+	}
+	return g_apps.items[g_selected].path;
+}
+
+bool bl_sm_ui_run_program(void)
+{
+	const char *path = bl_sm_ui_selected_path();
+	bool ok;
+
+	if (path == NULL) {
+		return false;
+	}
+	strncpy(g_install_name, g_apps.items[g_selected].name, sizeof(g_install_name) - 1U);
+	g_install_name[sizeof(g_install_name) - 1U] = '\0';
+	g_screen = UI_SCREEN_INSTALL;
+	boot_app_set_progress_handler(ui_on_install_progress);
+	ui_draw_install_screen();
+	printf("UI: install %s\r\n", path);
+	ok = boot_app_install_from_file(path);
+	boot_app_set_progress_handler(NULL);
+	return ok;
+}
+
+static bl_sm_ui_poll_t ui_poll_uart_sm(void)
+{
+	uint8_t c;
+
+	if (!debug_uart_getchar_nonblock(&c)) {
+		return BL_UI_POLL_NONE;
+	}
+	if (c == 'a' || c == 'A') {
+		return BL_UI_POLL_LAUNCH_APP;
+	}
+	if (c == 'r' || c == 'R') {
+		return BL_UI_POLL_REFRESH_CATALOG;
+	}
+	if (c == 'b' || c == 'B') {
+		return BL_UI_POLL_COLD_RESET;
+	}
+	return BL_UI_POLL_NONE;
+}
+
+bl_sm_ui_poll_t bl_sm_ui_poll_browse(int *selected_out)
+{
+	int16_t x;
+	int16_t y;
+	bool pressed;
+	bl_sm_ui_poll_t uev;
+
+	if (selected_out != NULL) {
+		*selected_out = g_selected;
+	}
+
+	uev = ui_poll_uart_sm();
+	if (uev != BL_UI_POLL_NONE) {
+		return uev;
+	}
+
+	if (!touch_bl_read(&x, &y, &pressed)) {
+		if (g_touch_down) {
+			if (g_list_btn_pressed != UI_LIST_BTN_NONE) {
+				g_list_btn_pressed = UI_LIST_BTN_NONE;
+				ui_draw_list_buttons();
+			}
+			if (HAL_GetTick() >= g_ignore_touch_until) {
+				uev = ui_handle_list_tap_sm(g_down_x, g_down_y);
+				if (selected_out != NULL && g_selected >= 0) {
+					*selected_out = g_selected;
+				}
+				g_touch_down = false;
+				g_touch_anchor = false;
+				return uev;
+			}
+		}
+		g_touch_down = false;
+		g_touch_anchor = false;
+		return BL_UI_POLL_NONE;
+	}
+
+	g_touch_down = true;
+	if (!g_touch_anchor) {
+		g_touch_anchor = true;
+		g_down_x = x;
+		g_down_y = y;
+	}
+	g_last_x = x;
+	g_last_y = y;
+	ui_action_button_press_visual(x, y, true);
+	return BL_UI_POLL_NONE;
+}
+
+bl_sm_ui_poll_t bl_sm_ui_poll_inform(void)
+{
+	int16_t x;
+	int16_t y;
+	bool pressed;
+
+	if (!touch_bl_read(&x, &y, &pressed)) {
+		if (g_touch_down) {
+			if (g_msg_btn_pressed) {
+				g_msg_btn_pressed = false;
+				ui_draw_action_button("Back", false);
+			}
+			if (HAL_GetTick() >= g_ignore_touch_until &&
+			    point_in_rect(g_last_x, g_last_y, UI_BTN_X, UI_BTN_Y,
+			                  (int)UI_BTN_W, UI_BTN_H)) {
+				g_touch_down = false;
+				return BL_UI_POLL_DISMISS;
+			}
+		}
+		g_touch_down = false;
+		return BL_UI_POLL_NONE;
+	}
+
+	g_touch_down = true;
+	g_last_x = x;
+	g_last_y = y;
+	ui_action_button_press_visual(x, y, true);
+	return BL_UI_POLL_NONE;
 }

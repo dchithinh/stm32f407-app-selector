@@ -26,6 +26,5 @@ void boot_policy_sample_at_reset(void);
 bool boot_should_enter_loader(void);
 void boot_policy_log(void);
 bool boot_policy_user_requests_bootloader(void);
-bool boot_policy_confirm_autoboot(void);
 
 #endif

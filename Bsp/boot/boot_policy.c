@@ -1,5 +1,4 @@
 #include "boot_policy.h"
-#include "boot_ui.h"
 #include "boot_app.h"
 #include "boot_layout.h"
 #include "debug_uart.h"
@@ -105,10 +104,4 @@ void boot_policy_log(void)
 	} else {
 		printf("  -> autoboot to app (stay in BL: send j or press user btn in grace)\r\n");
 	}
-}
-
-bool boot_policy_confirm_autoboot(void)
-{
-	boot_ui_display_init();
-	return boot_ui_autoboot_grace();
 }

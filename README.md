@@ -1,4 +1,4 @@
-# stm32f4xx_sel_app_bl
+# App Selector Bootloader
 
 Selectable-application **bootloader** for **STM32F407** on the [2.4" TFT HAT](https://github.com/dchithinh/pcb-lab/tree/main/stm32f407_tft_2.4inch_hat) (ILI9341 + XPT2046 touch + microSD). Flash the bootloader once over SWD; swap applications from the SD card using the touch menu—no ST-Link for every app update.
 
@@ -56,12 +56,24 @@ Each app is a **separate** firmware image, not part of this repo.
 
 Example companion app in the same workspace: [stm32f407xx_pomodoro](https://github.com/dchithinh/stm32f407xx_pomodoro)
 
+## Control flow (state machine)
+
+Behavior matches [`Doc/bootloader_design.puml`](Doc/bootloader_design.puml) and [`Doc/bootloader_state_machine.md`](Doc/bootloader_state_machine.md).
+
+| Module | Role |
+|--------|------|
+| `Bsp/sm/bl_sm_engine.c` | Transition table, dispatch, entry/exit, main loop |
+| `Bsp/sm/bl_sm_guards.c` | Pure guards |
+| `Bsp/sm/bl_sm_actions.c` | Effects (flash, reset, handoff) |
+| `Bsp/sm/bl_sm_ui.c` | LCD/touch/SD UI; polls user input into events |
+
+`main()` initializes HAL and boot policy, then calls `bl_sm_run()` (no separate policy branch / `boot_ui_run()` loop).
 
 ## Entering the bootloader
 
 | Condition | Result |
 |-----------|--------|
-| Valid app + autoboot allowed | 5 s grace, then jump to app |
+| Valid app + autoboot allowed | 10 s grace (`BOOT_AUTOBOOT_GRACE_MS`), then jump to app |
 | During grace: **user button** (PA0) or UART **`j`** | Stay in bootloader |
 | **User button** held ~400 ms at reset | Bootloader menu |
 | Invalid or empty app slot | Bootloader menu |
@@ -75,10 +87,10 @@ Printed at startup (`?` repeats help):
 
 | Key | Action |
 |-----|--------|
-| Touch UI | Select app → install (if needed) → run |
-| **`a`** | Run currently flashed app (if valid) |
-| **`r`** | Rescan `/apps/` on SD |
-| **`b`** | Reboot MCU |
+| Touch **Reboot** | `REBOOT`: jump to flashed app if valid, else MCU reset |
+| **`a`** | `LAUNCH_FLASHED_APP` — run flashed app (if valid) |
+| **`r`** | `REFRESH_CATALOG` |
+| **`b`** | `COLD_RESET` — MCU reset |
 | **`?`** | Help |
 
 During autoboot grace only: **`j`** cancels autoboot (same intent as pressing the user button).

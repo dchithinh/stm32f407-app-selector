@@ -1,0 +1,85 @@
+@startuml stm32f4xx_sel_app_bl_design
+title stm32f4xx_sel_app_bl (flat FSM)
+
+skinparam state<<choice>> BackgroundColor LightYellow
+skinparam state<<terminate>> BackgroundColor Pink
+
+state ROUTE_TARGET <<choice>>
+state CATALOG_RESULT <<choice>>
+state REBOOT_TARGET <<choice>>
+
+[*] --> ASSESS_IMAGE : POWER_ON [ ] / start_assess
+
+ASSESS_IMAGE : entry / validate_vector_table
+ASSESS_IMAGE : exit / latch_boot_decision
+ASSESS_IMAGE --> ROUTE_TARGET : ASSESS_DONE [ ] / route_boot_target
+
+ROUTE_TARGET --> AUTOBOOT_GRACE : ASSESS_DONE [APP_IMAGE_VALID_AND_AUTOBOOT] / init_grace_ui
+ROUTE_TARGET --> AWAIT_CATALOG : ASSESS_DONE [ENTER_LOADER] / init_loader_shell
+
+AUTOBOOT_GRACE : entry / show_countdown
+AUTOBOOT_GRACE : do / poll_inputs; tick_one_second
+AUTOBOOT_GRACE : exit / hide_countdown
+AUTOBOOT_GRACE --> RUNNING_APP : GRACE_ELAPSED [ ] / handoff_to_app
+AUTOBOOT_GRACE --> AWAIT_CATALOG : STAY_IN_LOADER [ ] / init_loader_shell
+
+AWAIT_CATALOG : entry / mount_and_scan_apps
+AWAIT_CATALOG : exit / classify_catalog
+AWAIT_CATALOG --> CATALOG_RESULT : SCAN_DONE [ ] / classify_catalog
+
+CATALOG_RESULT --> BROWSE : SCAN_DONE [CATALOG_READY] / show_list
+CATALOG_RESULT --> INFORM : SCAN_DONE [CATALOG_UNAVAILABLE] / show_error
+
+BROWSE : entry / render_app_list
+BROWSE : do / poll_list_inputs
+BROWSE --> BROWSE : SELECT_APP [ ] / update_selection
+BROWSE --> BROWSE : REFRESH_CATALOG [ ] / rescan_sd
+BROWSE --> PROGRAM : CONFIRM_INSTALL [APP_SELECTED] / begin_program
+BROWSE --> RUNNING_APP : LAUNCH_FLASHED_APP [APP_IMAGE_VALID] / handoff_to_app
+BROWSE --> REBOOT_TARGET : REBOOT [ ] / classify_reboot
+BROWSE --> COLD_RESET : COLD_RESET [ ] / nvic_reset
+
+REBOOT_TARGET --> RUNNING_APP : REBOOT [APP_IMAGE_VALID] / handoff_to_app
+REBOOT_TARGET --> COLD_RESET : REBOOT [NOT_APP_IMAGE_VALID] / nvic_reset
+
+PROGRAM : entry / erase_app_slot
+PROGRAM : do / flash_from_sd_and_progress
+PROGRAM : exit / verify_image_optional
+PROGRAM --> COLD_RESET : PROGRAM_DONE [SUCCESS] / nvic_reset
+PROGRAM --> INFORM : PROGRAM_DONE [FAIL] / show_install_failed
+
+INFORM : entry / render_message
+INFORM : do / poll_dismiss
+INFORM --> BROWSE : DISMISS [CATALOG_READY] / show_list
+INFORM --> INFORM : DISMISS [CATALOG_UNAVAILABLE] / keep_message
+
+state RUNNING_APP <<terminate>>
+RUNNING_APP : entry / deinit_bl_jump_app
+
+state COLD_RESET <<terminate>>
+COLD_RESET : entry / nvic_system_reset
+
+note right of ROUTE_TARGET
+  ENTER_LOADER when:
+  NOT APP_IMAGE_VALID, or FORCE_LOADER,
+  or USER_HELD_BUTTON_AT_RESET
+  else APP_IMAGE_VALID_AND_AUTOBOOT
+end note
+
+note right of AUTOBOOT_GRACE
+  STAY_IN_LOADER sources:
+  USER_BUTTON, UART_J, TOUCH_BOOT_MENU
+end note
+
+note right of REBOOT_TARGET
+  Touch Reboot posts REBOOT.
+  UART_A is LAUNCH_FLASHED_APP
+  (no COLD_RESET if invalid).
+end note
+
+note bottom of BROWSE
+  SD catalog max 100 files
+  UART_R REFRESH, UART_B COLD_RESET
+end note
+
+@enduml
